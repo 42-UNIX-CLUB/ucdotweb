@@ -1,0 +1,9 @@
+# build output and local data: never committed
+/build*/
+/build-*
+/bin/
+*.db
+*.db-*
+# secrets and local configuration
+/secrets/
+.env
