@@ -12,7 +12,8 @@ The service runs on any Linux server. But two things decide what a deployment is
 | The identity provider (the Virtual Clubroom's OpenID Connect part) | not built yet | the service cannot sign real users in. It refuses to start without a provider to discover |
 | The test stand-in (`oidc-standin`) | built | approves everyone as one fixed user, and listens on loopback only. It must never be reachable from the internet |
 | The UC.OS page side (the host layer that calls `/proxy/` and `/relay`) | not built | nothing in UC.OS uses the platform yet |
-| Admin interface, safety automation, notifications, a published abuse contact | not built | the threat model asks for these before the relay is open to members |
+| Admin API, safety automation, notifications | built (the admin program in UC.OS is not; notifications need a webhook, 2.6.1) | admins can work through the API; the safety watcher runs on its own |
+| A published abuse contact | not set up | the threat model asks for it before the relay is open to members; the address needs an owner |
 
 So there are two kinds of deployment:
 
@@ -260,6 +261,12 @@ sudo -u ucdotweb sqlite3 /var/lib/ucdotweb/ucdotweb.db ".backup /var/lib/ucdotwe
 
 Copy `backup.db` off the server (it holds pseudonymous ids, counters, 30 days of host-only
 logs and the audit log; sessions inside are encrypted with `db.key`).
+
+Device-transfer bundles live as files in `/var/lib/ucdotweb/bundles` (the default,
+`UCDOTWEB_BUNDLE_DIR` to move it), created on the first start. They are ciphertext the server
+cannot read, and they expire within 30 days, so they need no backup. Their disk use is at most
+the bundle limit (50 MB by default) times the number of users; `du -sh` on that directory
+shows it.
 
 ## 3. Production (B), once the Clubroom's provider exists
 
