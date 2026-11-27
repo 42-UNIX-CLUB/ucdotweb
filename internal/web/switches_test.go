@@ -150,3 +150,17 @@ func TestAdminCaps(t *testing.T) {
 		t.Fatalf("caps %v", out.Caps)
 	}
 }
+
+func TestCheckOrigin(t *testing.T) {
+	for _, s := range []string{"https://dux.ensui.dev", "http://127.0.0.1:8090", "https://example.org:8443"} {
+		if err := CheckOrigin(s); err != nil {
+			t.Errorf("%q refused: %v", s, err)
+		}
+	}
+	for _, s := range []string{"https://dux.ensui.dev/", "https://dux.ensui.dev/app", "dux.ensui.dev", "ftp://x.org",
+		"https://", "https://x.org?", "https://x.org#", "https://user@x.org", "https://Dux.Ensui.dev", ""} {
+		if err := CheckOrigin(s); err == nil {
+			t.Errorf("%q accepted", s)
+		}
+	}
+}

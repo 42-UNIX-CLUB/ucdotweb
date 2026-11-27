@@ -88,7 +88,7 @@ func TestLoginWritesNoRowAndSealsACookie(t *testing.T) {
 		t.Fatalf("GET /auth/login stored %d session rows, want 0", n)
 	}
 	sc := setCookieFor(resp, "ucdotweb-signin")
-	for _, want := range []string{"HttpOnly", "SameSite=Lax", "Path=/auth/callback", "Max-Age=600"} {
+	for _, want := range []string{"HttpOnly", "SameSite=Lax", "Path=/;", "Max-Age=600"} {
 		if !strings.Contains(sc, want) {
 			t.Fatalf("pending cookie %q lacks %s", sc, want)
 		}
@@ -103,7 +103,7 @@ func TestLoginWritesNoRowAndSealsACookie(t *testing.T) {
 	sec := &Server{Sessions: session.New(time.Minute, time.Hour, true), DB: r.db}
 	rec := httptest.NewRecorder()
 	sec.setPendingCookie(rec, "v", int(pendingLife.Seconds()))
-	if sc := rec.Header().Get("Set-Cookie"); !strings.HasPrefix(sc, "__Secure-ucdotweb-signin=") || !strings.Contains(sc, "; Secure") {
+	if sc := rec.Header().Get("Set-Cookie"); !strings.HasPrefix(sc, "__Host-ucdotweb-signin=") || !strings.Contains(sc, "; Secure") {
 		t.Fatalf("secure mode: pending cookie %q", sc)
 	}
 }
@@ -115,7 +115,7 @@ func TestFullSignInClearsThePendingCookie(t *testing.T) {
 	if resp.StatusCode != http.StatusFound || r.sessions.Count() != 1 {
 		t.Fatalf("callback: status %d, sessions %d", resp.StatusCode, r.sessions.Count())
 	}
-	if sc := setCookieFor(resp, st.cookie.Name); !strings.Contains(sc, "Max-Age=0") || !strings.Contains(sc, "Path=/auth/callback") {
+	if sc := setCookieFor(resp, st.cookie.Name); !strings.Contains(sc, "Max-Age=0") || !strings.Contains(sc, "Path=/;") {
 		t.Fatalf("pending cookie not cleared: %q", sc)
 	}
 }

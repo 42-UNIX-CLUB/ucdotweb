@@ -376,14 +376,20 @@ func (s *session) portAllowed(p int) bool {
 }
 
 func (s *session) refuse(id uint32, host string, reason byte, outcome string) {
+	s.refuseAs(id, host, reason, outcome, outcome)
+}
+
+// refuseAs answers a refused CONNECT and logs it, counting it under kind for the allowance
+// of logged refusals: an outcome that carries a number (the port) still shares one allowance.
+func (s *session) refuseAs(id uint32, host string, reason byte, outcome, kind string) {
 	_ = s.send(pClose, id, []byte{reason})
 	now := time.Now()
 	s.rl.mu.Lock()
 	if s.us.refused == nil || now.Sub(s.us.refusedAt) > time.Minute {
 		s.us.refusedAt, s.us.refused = now, map[string]int{}
 	}
-	s.us.refused[outcome]++
-	write := s.us.refused[outcome] <= refusalLogsPerMin
+	s.us.refused[kind]++
+	write := s.us.refused[kind] <= refusalLogsPerMin
 	s.rl.mu.Unlock()
 	if write {
 		_ = s.rl.DB.LogConn(s.sub, "relay", host, 0, outcome)
@@ -413,7 +419,7 @@ func (s *session) connect(ctx context.Context, id uint32, body []byte) {
 		return
 	}
 	if !s.portAllowed(port) {
-		s.refuse(id, host, reasonBlocked, fmt.Sprintf("port %d refused", port))
+		s.refuseAs(id, host, reasonBlocked, fmt.Sprintf("port %d refused", port), "port refused")
 		return
 	}
 	if s.rl.DB.CapReached("relay") {

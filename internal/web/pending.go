@@ -25,8 +25,8 @@ const (
 	pendingLabel = "ucdotweb pending sign-in v1"
 	// pendingLife matches the 10 minutes oidc.Finish allows for a sign-in.
 	pendingLife = 10 * time.Minute
-	// pendingPath is the only path the browser sends the cookie to.
-	pendingPath = "/auth/callback"
+	// pendingPath is "/" because __Host- cookies require it (see pendingCookie).
+	pendingPath = "/"
 )
 
 // pendingSignIn is the sealed content. It carries its own expiry, checked when opened.
@@ -42,11 +42,13 @@ func (p pendingSignIn) oidc() oidc.Pending {
 	return oidc.Pending{State: p.State, Nonce: p.Nonce, Verifier: p.Verifier, Created: p.Created}
 }
 
-// pendingCookie is the cookie's name. With Secure it takes the __Secure- prefix, so a
-// plain-http page cannot set it.
+// pendingCookie is the cookie's name. With Secure it takes the __Host- prefix, like the
+// session cookie: no other site under the same domain can plant it (a __Secure- cookie can
+// be set with a Domain attribute by a sibling name). __Host- requires Path=/, so the cookie
+// travels with every request to the origin for the few minutes of a sign-in.
 func (s *Server) pendingCookie() string {
 	if s.Sessions.Secure {
-		return "__Secure-ucdotweb-signin"
+		return "__Host-ucdotweb-signin"
 	}
 	return "ucdotweb-signin"
 }

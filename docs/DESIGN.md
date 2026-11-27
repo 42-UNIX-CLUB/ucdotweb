@@ -728,8 +728,8 @@ are in the `opt_test.go` files). Fixed, inside the decided design:
   size the OS's client sends, so an honest client never reaches it. A first cap of 1 MiB reset
   such clients and was raised.
 - Relay: a CLOSE that arrives while the connection is being made no longer leaves that
-  connection open. Refused CONNECTs are logged at most 10 a minute per user and outcome, so
-  a flood of one kind cannot hide a limit trip.
+  connection open. Refused CONNECTs are logged at most 10 a minute per user and kind of
+  refusal (all refused ports are one kind), so a flood of one kind cannot hide a limit trip.
 - Address guard: an IPv6 literal with a zone (`%lo`) is refused; it escaped the prefix list.
 - Panic switches: a switch that cannot be read counts as on (fails closed).
 - Proxy: the rate limit is checked before anything is logged, so refused requests are limited
@@ -768,9 +768,11 @@ Mechanical choices, each reversible:
   database key (`store.DeriveKey`). No new secret file. The label is also the AES-GCM
   additional data. To use a separate key instead, add a key file and pass it to the server.
 - The cookie is `HttpOnly`, `SameSite=Lax`, `Max-Age=600`, and `Secure` unless
-  `UCDOTWEB_INSECURE_COOKIES=1`. Its path is `/auth/callback`, the narrowest that works, so
-  the browser sends it nowhere else. Its name is `__Secure-ucdotweb-signin`, or
-  `ucdotweb-signin` without Secure. Change `pendingPath` and `pendingCookie` in
+  `UCDOTWEB_INSECURE_COOKIES=1`. Its name is `__Host-ucdotweb-signin` (or
+  `ucdotweb-signin` without Secure) with path `/`, like the session cookie, so no other site
+  under the same domain can plant one. A first version used `__Secure-` with path
+  `/auth/callback`, which a sibling name could set; the review caught it. The cost: during a
+  sign-in the cookie (a few hundred bytes) goes with every request to the origin. Change `pendingPath` and `pendingCookie` in
   `internal/web/pending.go`.
 - Reuse: the callback clears the cookie, and the state of each sign-in that completes is
   remembered in memory until its expiry. A second callback with the same cookie, even with
@@ -863,3 +865,16 @@ Mechanical choices, each reversible:
 The remaining open points of 15.11 (anonymous `/auth/login` rows, the admin bootstrap reading
 `login` without the 42 link) are not touched here.
 
+
+### 15.14 Small fixes (2026-11-27)
+
+- `users.member_until` is no longer read. Nothing has written it since the member role began
+  to follow `ft_active` (15.9). The column stays in the table, unused, so no migration is
+  needed; the admin API no longer shows it.
+- `UCDOTWEB_ORIGIN` is checked at start: scheme and host only, lower case, no trailing slash.
+  Before, a trailing slash made every Origin check fail with no message.
+- A guard test sends 2,000,000 awkward request paths through the proxy's checks and confirms
+  none leaves its allowed prefix after one decoding (`internal/proxy/optpath_test.go`). A
+  server that decodes twice could be led out with `%25`; the listed mirrors are not known to
+  do that. Refusing `%25` would close it and also refuse file names with a literal percent
+  sign: open, for the owners.

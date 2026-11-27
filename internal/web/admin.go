@@ -130,16 +130,9 @@ func intParam(r *http.Request, name string, def, max int64) int64 {
 	return n
 }
 
-func unix(t time.Time) int64 {
-	if t.IsZero() {
-		return 0
-	}
-	return t.Unix()
-}
-
 func userJSON(u store.User) map[string]any {
 	return map[string]any{"subject": u.Subject, "login": u.Login, "member_grant": u.MemberGrant,
-		"member_until": unix(u.MemberUntil), "admin": u.AdminGrant, "banned": u.Banned, "ban_reason": u.BanReason}
+		"admin": u.AdminGrant, "banned": u.Banned, "ban_reason": u.BanReason}
 }
 
 func (s *Server) adminUsers(w http.ResponseWriter, r *http.Request, _ Viewer) {

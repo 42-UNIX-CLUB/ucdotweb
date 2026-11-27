@@ -75,6 +75,9 @@ func hexFile(logger *log.Logger, env string, n int) []byte {
 func main() {
 	logger := log.New(os.Stderr, "ucdotweb: ", log.LstdFlags)
 	origin := need("UCDOTWEB_ORIGIN")
+	if err := web.CheckOrigin(origin); err != nil {
+		logger.Fatalf("UCDOTWEB_ORIGIN: %v", err) // every Origin check compares this exact string
+	}
 	secret, err := os.ReadFile(need("UCDOTWEB_SECRET_FILE"))
 	if err != nil {
 		logger.Fatalf("reading the client secret file: %v", err)

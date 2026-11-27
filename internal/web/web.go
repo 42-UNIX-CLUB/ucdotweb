@@ -185,6 +185,26 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(out)
 }
 
+// CheckOrigin reports whether s is an origin as browsers send it in the Origin header:
+// scheme and host (with an optional port) and nothing else, such as "https://example.org".
+// A trailing slash or a path would make every Origin comparison fail without a word.
+func CheckOrigin(s string) error {
+	u, err := url.Parse(s)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "http" && u.Scheme != "https" || u.Host == "" {
+		return errors.New("want http:// or https:// and a host, like https://example.org")
+	}
+	if u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || strings.HasSuffix(s, "?") || strings.HasSuffix(s, "#") {
+		return errors.New("want only the scheme and host, with no slash, path, query or fragment at the end")
+	}
+	if strings.ToLower(s) != s {
+		return errors.New("write it in lower case, as browsers send it")
+	}
+	return nil
+}
+
 // sameOrigin requires a state-changing request to come from our own pages: an Origin header
 // equal to ours (browsers send it on POST), plus the SameSite cookie as a second line.
 func (s *Server) sameOrigin(r *http.Request) bool {
@@ -212,9 +232,6 @@ func (s *Server) fromData(d *session.Data) (Viewer, bool) {
 		return Viewer{}, false
 	}
 	linked := truthy(d.Claims["ft_linked"])
-	if linked && !u.MemberUntil.IsZero() && time.Now().After(u.MemberUntil) {
-		linked = false
-	}
 	if linked && !ftActive(d.Claims) {
 		linked = false // the member role from a 42 link lasts while the 42 account is active
 	}
