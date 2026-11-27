@@ -43,6 +43,9 @@ func newRig(t *testing.T, signedIn bool) *rig {
 			http.Redirect(w, req, "/debian/dists/stable/InRelease", http.StatusFound)
 		case strings.HasSuffix(req.URL.Path, "/info/refs"):
 			io.WriteString(w, "refs")
+		case strings.HasSuffix(req.URL.Path, "/git-upload-pack"): // reads the whole body, like git
+			io.Copy(io.Discard, req.Body)
+			io.WriteString(w, "pack")
 		default:
 			http.NotFound(w, req)
 		}
@@ -358,5 +361,32 @@ func TestCopyEndOutcomes(t *testing.T) {
 	}
 	if _, end := p.copyQuota(rec, strings.NewReader("abcdef"), "u2", 3); end != endQuota {
 		t.Fatalf("a body over the quota ended as %d, want endQuota", end)
+	}
+}
+
+// A body with no length that passes the limit while streaming fails the upstream request:
+// the upstream never gets a shortened body, and the client gets 413.
+func TestChunkedLargePostRefused(t *testing.T) {
+	r := newRig(t, true)
+	pr, pw := io.Pipe()
+	go func() {
+		chunk := make([]byte, 1<<20)
+		for i := 0; i < 9; i++ {
+			if _, err := pw.Write(chunk); err != nil {
+				return
+			}
+		}
+		pw.Close()
+	}()
+	req, _ := http.NewRequest("POST", r.front.URL+"/proxy/github.com/a/b.git/git-upload-pack", pr)
+	req.Header.Set("X-UCOS-Proxy", "1")
+	req.Header.Set("Content-Type", "application/x-git-upload-pack-request")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("a chunked body of 9 MiB: status %d, want 413", resp.StatusCode)
 	}
 }

@@ -158,7 +158,7 @@ func TestCheckOrigin(t *testing.T) {
 		}
 	}
 	for _, s := range []string{"https://dux.ensui.dev/", "https://dux.ensui.dev/app", "dux.ensui.dev", "ftp://x.org",
-		"https://", "https://x.org?", "https://x.org#", "https://user@x.org", "https://Dux.Ensui.dev", ""} {
+		"https://", "https://x.org?", "https://x.org#", "https://user@x.org", "https://Dux.Ensui.dev", "https://x.org:443", "http://x.org:80", ""} {
 		if err := CheckOrigin(s); err == nil {
 			t.Errorf("%q accepted", s)
 		}

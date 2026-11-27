@@ -8,7 +8,6 @@
 package proxy
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -351,19 +350,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		target += "?" + r.URL.RawQuery
 	}
 	var body io.Reader
+	var capped *cappedBody
 	if r.Method == "POST" {
-		// a clone negotiation is small: a larger body is refused, never cut and sent on
-		b, err := io.ReadAll(io.LimitReader(r.Body, maxPostBody+1))
-		if err != nil {
-			fail(w, http.StatusBadRequest, "The request body could not be read.")
-			return
-		}
-		if len(b) > maxPostBody {
+		// a clone negotiation is small: a larger body is refused, never cut and sent on. It is
+		// streamed, not held: a known length over the limit is refused at once, and a body that
+		// passes the limit while streaming makes the upstream request fail (no short body is
+		// ever sent). The 10-minute limit below covers a body that stalls.
+		if r.ContentLength > maxPostBody {
 			_ = p.DB.LogConn(subject, kind, host, 0, "body too large")
 			fail(w, http.StatusRequestEntityTooLarge, "The request body is over 8 MiB.")
 			return
 		}
-		body = bytes.NewReader(b)
+		capped = &cappedBody{r: r.Body, left: maxPostBody}
+		body = capped
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
@@ -386,6 +385,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return nil
 	}
 	resp, err := c.Do(up)
+	if err != nil && capped != nil && capped.over {
+		_ = p.DB.LogConn(subject, kind, host, 0, "body too large")
+		fail(w, http.StatusRequestEntityTooLarge, "The request body is over 8 MiB.")
+		return
+	}
 	if err != nil {
 		outcome := "upstream error"
 		if errors.Is(err, netguard.ErrBlocked) {
@@ -412,6 +416,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case end == endQuota:
 		outcome += " cut at quota"
+	case end != endDone && end != endQuota && r.Context().Err() != nil:
+		outcome += " client gone" // the browser left: the upstream read then fails as well
 	case end == endUpstream && ctx.Err() == context.DeadlineExceeded:
 		outcome += " cut at time limit" // the 10 minutes a request may last
 	case end == endUpstream:
@@ -464,6 +470,32 @@ const (
 	endUpstream                // the upstream read failed, or the request's time ran out
 	endClient                  // the browser went away
 )
+
+// cappedBody passes a request body through and fails once more than left bytes have come,
+// so the upstream request is aborted instead of being sent a shortened body.
+type cappedBody struct {
+	r    io.Reader
+	left int64
+	over bool
+}
+
+func (c *cappedBody) Read(p []byte) (int, error) {
+	if c.left < 0 {
+		return 0, errBodyTooLarge
+	}
+	if int64(len(p)) > c.left+1 {
+		p = p[:c.left+1]
+	}
+	n, err := c.r.Read(p)
+	c.left -= int64(n)
+	if c.left < 0 {
+		c.over = true
+		return 0, errBodyTooLarge
+	}
+	return n, err
+}
+
+var errBodyTooLarge = errors.New("proxy: request body over the limit")
 
 // maxPostBody is the largest POST body passed on (git's clone negotiation is far smaller).
 const maxPostBody = 8 << 20

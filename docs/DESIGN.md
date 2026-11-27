@@ -871,17 +871,22 @@ The remaining open points of 15.11 (anonymous `/auth/login` rows, the admin boot
 - `users.member_until` is no longer read. Nothing has written it since the member role began
   to follow `ft_active` (15.9). The column stays in the table, unused, so no migration is
   needed; the admin API no longer shows it.
-- `UCDOTWEB_ORIGIN` is checked at start: scheme and host only, lower case, no trailing slash.
+- `UCDOTWEB_ORIGIN` is checked at start: scheme and host only, lower case, no trailing slash,
+  no default port (browsers leave it out of the Origin header).
   Before, a trailing slash made every Origin check fail with no message.
 - A guard test sends 2,000,000 awkward request paths through the proxy's checks and confirms
   none leaves its allowed prefix after one decoding (`internal/proxy/optpath_test.go`). A
   server that decodes twice could be led out with `%25`; the listed mirrors are not known to
   do that. Refusing `%25` would close it and also refuse file names with a literal percent
   sign: open, for the owners.
-- Proxy: a POST body over 8 MiB is refused with 413 instead of being cut and sent on. The
-  log says why a download ended early: "cut at quota", "cut at time limit" (the 10 minutes a
-  request may last), "upstream error" or "client gone".
+- Proxy: a POST body over 8 MiB is refused with 413 instead of being cut and sent on. It is
+  streamed, never held: a stated length over the limit is refused at once, and a body that
+  passes the limit while streaming aborts the upstream request. (A first version read the
+  body whole before sending it on, so stalled bodies stayed in memory; the review caught
+  it.) The log says why a download ended early: "cut at quota", "cut at time limit" (the 10
+  minutes a request may last), "upstream error" or "client gone".
 - Shutdown: on SIGTERM or Ctrl-C the server stops taking requests, gives running proxy
   requests up to 20 seconds to finish and write their usage, then writes the relay's pending
   usage. systemd's default stop timeout (90 s) leaves room for it. A proxy download still
-  running after 20 seconds is cut, and its bytes since the start are not counted.
+  running after 20 seconds is cut, and its bytes since the start are not counted. Relay
+  streams still open at that moment get their bytes counted but no connection log row.

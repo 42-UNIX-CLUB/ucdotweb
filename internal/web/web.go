@@ -202,6 +202,9 @@ func CheckOrigin(s string) error {
 	if strings.ToLower(s) != s {
 		return errors.New("write it in lower case, as browsers send it")
 	}
+	if u.Scheme == "https" && u.Port() == "443" || u.Scheme == "http" && u.Port() == "80" {
+		return errors.New("leave out the default port, as browsers do in the Origin header")
+	}
 	return nil
 }
 
