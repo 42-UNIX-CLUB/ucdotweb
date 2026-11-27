@@ -96,12 +96,18 @@ func (d *DB) Bundles(subject string) ([]BundleRow, error) {
 	return out, rows.Err()
 }
 
-// BundleBytes is the total size of the subject's pending bundles.
+// BundleBytes is the total size of the subject's bundles that still have a file on disk:
+// expired ones count until housekeeping or the user's next upload removes them, so the limit
+// bounds the disk and not only what can be downloaded.
 func (d *DB) BundleBytes(subject string) (int64, error) {
 	var n int64
-	err := d.sql.QueryRow(`SELECT coalesce(sum(size), 0) FROM bundles WHERE subject = ? AND expires > ?`,
-		subject, d.now().Unix()).Scan(&n)
+	err := d.sql.QueryRow(`SELECT coalesce(sum(size), 0) FROM bundles WHERE subject = ?`, subject).Scan(&n)
 	return n, err
+}
+
+// ExpiredBundlesOf returns the ids of the subject's expired bundles.
+func (d *DB) ExpiredBundlesOf(subject string) ([]string, error) {
+	return d.bundleIDs(`SELECT id FROM bundles WHERE subject = ? AND expires <= ?`, subject, d.now().Unix())
 }
 
 // DeleteBundle removes the subject's bundle record. The caller removes the file.
@@ -119,7 +125,11 @@ func (d *DB) DeleteBundle(subject, id string) error {
 // ExpiredBundles returns the ids of bundles past their expiry, for housekeeping to remove
 // their files and then call ForgetBundles.
 func (d *DB) ExpiredBundles() ([]string, error) {
-	rows, err := d.sql.Query(`SELECT id FROM bundles WHERE expires <= ?`, d.now().Unix())
+	return d.bundleIDs(`SELECT id FROM bundles WHERE expires <= ?`, d.now().Unix())
+}
+
+func (d *DB) bundleIDs(query string, args ...any) ([]string, error) {
+	rows, err := d.sql.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -146,9 +156,9 @@ func (d *DB) ForgetBundles(ids []string) error {
 }
 
 // KnownBundle reports whether a bundle record exists, expired or not (housekeeping uses it
-// to find files that have no record).
-func (d *DB) KnownBundle(id string) bool {
+// to find files that have no record). On an error the caller must keep the file.
+func (d *DB) KnownBundle(id string) (bool, error) {
 	var n int
-	_ = d.sql.QueryRow(`SELECT count(*) FROM bundles WHERE id = ?`, id).Scan(&n)
-	return n > 0
+	err := d.sql.QueryRow(`SELECT count(*) FROM bundles WHERE id = ?`, id).Scan(&n)
+	return n > 0, err
 }

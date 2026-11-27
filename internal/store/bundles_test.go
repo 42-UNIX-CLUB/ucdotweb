@@ -12,10 +12,13 @@ func TestBundleRecords(t *testing.T) {
 		t.Fatalf("default bundle quota %d %v", q.BundleBytes, err)
 	}
 	_ = d.AddBundle("a", "u", 10, time.Now().Add(time.Hour))
-	_ = d.AddBundle("b", "u", 20, time.Now().Add(-time.Second)) // expired: not counted, not served
+	_ = d.AddBundle("b", "u", 20, time.Now().Add(-time.Second)) // expired: not served, but counted until its file is gone
 	_ = d.AddBundle("c", "v", 40, time.Now().Add(time.Hour))
-	if n, _ := d.BundleBytes("u"); n != 10 {
-		t.Fatalf("used %d, want 10", n)
+	if n, _ := d.BundleBytes("u"); n != 30 {
+		t.Fatalf("used %d, want 30", n)
+	}
+	if ids, _ := d.ExpiredBundlesOf("u"); len(ids) != 1 || ids[0] != "b" {
+		t.Fatalf("u's expired %v", ids)
 	}
 	if _, err := d.Bundle("u", "b"); err != ErrNoBundle {
 		t.Fatal("expired bundle served")

@@ -715,3 +715,29 @@ Mechanical choices, reversible:
 
 Left for the OS (uc-os-dev): the bundle format, the encryption, and the QR code. 15.1 also
 plans an offline encrypted file export (option c) first, built entirely in the OS.
+
+### 15.11 Fixes from the first code review (2026-11-27)
+
+A review session read the whole code base and confirmed each of these with a test (the tests
+are in the `opt_test.go` files). Fixed, inside the decided design:
+
+- Relay: the new-destinations-a-minute limit no longer resets when the socket is closed and
+  reopened. A user's state is kept until their last destination is a minute old.
+- Relay: a stream may have at most 1 MiB of client data waiting for the far end (credit
+  counts packets, and one packet may be 1 MiB). An honest client never comes near it.
+- Relay: a CLOSE that arrives while the connection is being made no longer leaves that
+  connection open. Refused CONNECTs are logged at most 10 a minute per user.
+- Address guard: an IPv6 literal with a zone (`%lo`) is refused; it escaped the prefix list.
+- Panic switches: a switch that cannot be read counts as on (fails closed).
+- Proxy: the rate limit is checked before anything is logged, so refused requests are limited
+  too; only the first refusal of a burst writes a "rate limited" row; hosts over 253
+  characters are refused.
+- Bundles: the space limit bounds the disk. Expired bundles count until their file is gone,
+  and a user's own expired bundles are removed at their next upload. Housekeeping keeps a file
+  when it cannot read the database, and goes on past a file it cannot remove. A failure on our
+  disk answers 500 and is logged.
+
+Open, put to the owners on 2026-11-27 with options: anonymous
+`/auth/login` stores a row each time; the admin bootstrap reads the `login` claim without the
+42 link; limit trips of either service suspend the relay; bundle traffic is outside the
+quotas and caps, and `bundle_bytes = 0` has no ceiling.

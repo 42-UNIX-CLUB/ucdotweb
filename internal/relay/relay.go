@@ -33,18 +33,23 @@ const (
 	pContinue = 3
 	pClose    = 4
 
-	reasonVoluntary  = 0x02
-	reasonNetwork    = 0x03
-	reasonInvalid    = 0x41
-	reasonUnreach    = 0x42
-	reasonTimeout    = 0x43
-	reasonRefused    = 0x44
-	reasonBlocked    = 0x48
-	reasonThrottled  = 0x49
-	buffer           = 128 // DATA packets a client may send per stream before waiting for CONTINUE
-	tokenPrefix      = "ucos-token."
-	recheckInterval  = 5 * time.Second
-	usageFlushPeriod = 10 * time.Second
+	reasonVoluntary = 0x02
+	reasonNetwork   = 0x03
+	reasonInvalid   = 0x41
+	reasonUnreach   = 0x42
+	reasonTimeout   = 0x43
+	reasonRefused   = 0x44
+	reasonBlocked   = 0x48
+	reasonThrottled = 0x49
+	buffer          = 128 // DATA packets a client may send per stream before waiting for CONTINUE
+	// maxQueued is the most client bytes a stream may have waiting for the far end. Credit
+	// counts packets and a packet may be 1 MiB, so without it one stream could make the relay
+	// hold 128 MiB. 128 TCP segments are under 200 KB: an honest client never reaches it.
+	maxQueued         = 1 << 20
+	refusalLogsPerMin = 10 // refused CONNECTs logged per user a minute; the rest are only answered
+	tokenPrefix       = "ucos-token."
+	recheckInterval   = 5 * time.Second
+	usageFlushPeriod  = 10 * time.Second
 )
 
 // Check answers whether a subject with a session may still use the relay: the session
@@ -73,6 +78,24 @@ type userState struct {
 	pending int64                // bytes not yet written to the database
 	day     string
 	refs    int
+	// refusals logged in the current minute, so a client cannot fill the log with refusals
+	refusedAt time.Time
+	refused   int
+}
+
+// idle reports whether the state can be dropped: no socket, nothing to write, and no
+// destination counted in the last minute (else closing and reopening the socket would
+// reset the destinations-a-minute limit). Called under rl.mu.
+func (us *userState) idle(now time.Time) bool {
+	if us.refs > 0 || us.pending > 0 {
+		return false
+	}
+	for _, t := range us.dests {
+		if now.Sub(t) <= time.Minute {
+			return false
+		}
+	}
+	return true
 }
 
 func (rl *Relay) logf(f string, a ...any) {
@@ -145,6 +168,12 @@ func (rl *Relay) acquire(sub string) *userState {
 	if rl.users == nil {
 		rl.users = map[string]*userState{}
 	}
+	now := time.Now()
+	for s, u := range rl.users { // drop states kept only for their recent destinations
+		if s != sub && u.idle(now) {
+			delete(rl.users, s)
+		}
+	}
 	us := rl.users[sub]
 	if us == nil {
 		us = &userState{dests: map[string]time.Time{}, used: -1}
@@ -159,7 +188,7 @@ func (rl *Relay) release(sub string) {
 	defer rl.mu.Unlock()
 	if us := rl.users[sub]; us != nil {
 		us.refs--
-		if us.refs == 0 && us.pending == 0 {
+		if us.idle(time.Now()) {
 			delete(rl.users, sub)
 		}
 	}
@@ -220,9 +249,14 @@ type session struct {
 type stream struct {
 	id     uint32
 	host   string
-	conn   net.Conn
-	in     chan []byte // client to server, at most `buffer` packets
+	in     chan []byte  // client to server, at most `buffer` packets
+	queued atomic.Int64 // bytes in `in`, at most maxQueued
 	bytes  atomic.Int64
+
+	mu     sync.Mutex // guards conn and closed: a CLOSE may arrive while the dial runs
+	conn   net.Conn
+	closed bool
+
 	once   sync.Once
 	cancel context.CancelFunc
 }
@@ -268,6 +302,10 @@ func (s *session) run() {
 			s.mu.Unlock()
 			if st == nil {
 				continue // data for a stream already closed: ignore
+			}
+			if st.queued.Add(int64(len(body))) > maxQueued {
+				s.closeStream(st, reasonInvalid, "flow control violated", true)
+				continue
 			}
 			select {
 			case st.in <- append([]byte(nil), body...):
@@ -328,7 +366,17 @@ func (s *session) portAllowed(p int) bool {
 
 func (s *session) refuse(id uint32, host string, reason byte, outcome string) {
 	_ = s.send(pClose, id, []byte{reason})
-	_ = s.rl.DB.LogConn(s.sub, "relay", host, 0, outcome)
+	now := time.Now()
+	s.rl.mu.Lock()
+	if now.Sub(s.us.refusedAt) > time.Minute {
+		s.us.refusedAt, s.us.refused = now, 0
+	}
+	s.us.refused++
+	write := s.us.refused <= refusalLogsPerMin
+	s.rl.mu.Unlock()
+	if write {
+		_ = s.rl.DB.LogConn(s.sub, "relay", host, 0, outcome)
+	}
 }
 
 func (s *session) connect(ctx context.Context, id uint32, body []byte) {
@@ -422,12 +470,19 @@ func (s *session) dial(ctx context.Context, st *stream, dest string) {
 		s.closeStream(st, reason, outcome, true)
 		return
 	}
+	st.mu.Lock()
+	if st.closed { // closed while dialing: do not keep a connection nobody owns
+		st.mu.Unlock()
+		conn.Close()
+		return
+	}
 	st.conn = conn
+	st.mu.Unlock()
 	if s.send(pContinue, st.id, u32(buffer)) != nil {
 		s.closeStream(st, reasonNetwork, "socket gone", false)
 		return
 	}
-	go s.upstreamWriter(ctx, st)
+	go s.upstreamWriter(ctx, st, conn)
 	buf := make([]byte, 32<<10)
 	for {
 		n, err := conn.Read(buf)
@@ -451,18 +506,19 @@ func (s *session) dial(ctx context.Context, st *stream, dest string) {
 }
 
 // upstreamWriter writes client data to the TCP connection and returns flow-control credit.
-func (s *session) upstreamWriter(ctx context.Context, st *stream) {
+func (s *session) upstreamWriter(ctx context.Context, st *stream, conn net.Conn) {
 	written := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case p := <-st.in:
+			st.queued.Add(-int64(len(p)))
 			// counted before the write: the far end may answer at once, and a close that
 			// follows the answer must log these bytes too
 			st.bytes.Add(int64(len(p)))
 			ok := s.rl.account(s.us, int64(len(p)), s.q.BytesPerDay)
-			if _, err := st.conn.Write(p); err != nil {
+			if _, err := conn.Write(p); err != nil {
 				s.closeStream(st, reasonNetwork, "write failed", true)
 				return
 			}
@@ -483,8 +539,12 @@ func (s *session) upstreamWriter(ctx context.Context, st *stream) {
 func (s *session) closeStream(st *stream, reason byte, outcome string, notify bool) {
 	st.once.Do(func() {
 		st.cancel()
-		if st.conn != nil {
-			st.conn.Close()
+		st.mu.Lock()
+		st.closed = true
+		conn := st.conn
+		st.mu.Unlock()
+		if conn != nil {
+			conn.Close()
 		}
 		s.mu.Lock()
 		delete(s.streams, st.id)

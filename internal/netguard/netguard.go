@@ -40,6 +40,9 @@ type Guard struct {
 
 // Allowed reports whether an address may be reached.
 func (g *Guard) Allowed(a netip.Addr) bool {
+	if a.Zone() != "" {
+		return false // a zoned literal ("fe80::1%eth0") escapes the prefix list: never needed for the internet
+	}
 	a = a.Unmap() // IPv4-mapped IPv6 is checked as IPv4
 	if g.AllowLoopback && a.IsLoopback() {
 		return true

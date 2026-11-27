@@ -104,8 +104,7 @@ func (s *Server) bundleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secs, err := strconv.Atoi(r.URL.Query().Get("expires_in"))
-	ttl := time.Duration(secs) * time.Second
-	if err != nil || ttl < BundleMinExpiry || ttl > BundleMaxExpiry {
+	if err != nil || secs < int(BundleMinExpiry/time.Second) || secs > int(BundleMaxExpiry/time.Second) {
 		http.Error(w, "Give expires_in in seconds, from 60 to 2592000 (30 days).", http.StatusBadRequest)
 		return
 	}
@@ -114,6 +113,12 @@ func (s *Server) bundleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.endUpload(v.Subject)
+	ttl := time.Duration(secs) * time.Second
+	// the user's expired bundles still count against the space until their files are gone:
+	// remove them now, so the limit bounds the disk and does not block the user
+	if expired, err := s.DB.ExpiredBundlesOf(v.Subject); err == nil {
+		_, _ = s.removeBundles(expired)
+	}
 
 	q, err := s.DB.GetQuota(tierOf(v))
 	if err != nil {
@@ -148,26 +153,32 @@ func (s *Server) bundleUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Could not store the bundle.", http.StatusInternalServerError)
 		return
 	}
-	n, err := io.Copy(f, r.Body)
-	if err == nil {
-		err = f.Sync()
+	fw := &fileWriter{f: f}
+	n, err := io.Copy(fw, r.Body)
+	if err == nil && fw.err == nil {
+		fw.err = f.Sync()
 	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
+	if cerr := f.Close(); fw.err == nil {
+		fw.err = cerr
 	}
-	if err == nil && n == 0 {
+	switch {
+	case fw.err != nil: // our side: a full disk, for one
 		os.Remove(tmp)
-		http.Error(w, "The bundle is empty.", http.StatusBadRequest)
+		s.Log.Printf("bundles: writing %s: %v", tmp, fw.err)
+		http.Error(w, "Could not store the bundle.", http.StatusInternalServerError)
 		return
-	}
-	if err != nil {
+	case err != nil:
 		os.Remove(tmp)
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
 			http.Error(w, "Not enough bundle space. Delete a pending bundle or wait for one to expire.", http.StatusRequestEntityTooLarge)
 			return
 		}
-		http.Error(w, "The upload failed.", http.StatusBadRequest)
+		http.Error(w, "The upload was cut off.", http.StatusBadRequest)
+		return
+	case n == 0:
+		os.Remove(tmp)
+		http.Error(w, "The bundle is empty.", http.StatusBadRequest)
 		return
 	}
 	if err := os.Rename(tmp, s.bundlePath(id)); err != nil {
@@ -270,27 +281,57 @@ func (s *Server) bundleDelete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// fileWriter remembers a write error, so a failure on our disk is told apart from a
+// failure reading the client's body.
+type fileWriter struct {
+	f   *os.File
+	err error
+}
+
+func (w *fileWriter) Write(p []byte) (int, error) {
+	n, err := w.f.Write(p)
+	if err != nil {
+		w.err = err
+	}
+	return n, err
+}
+
+// removeBundles removes the files of the given bundles, then the records of those whose file
+// is gone. A file that cannot be removed keeps its record (and keeps counting against the
+// owner's space); the others go on. It returns how many files it removed and the first error.
+func (s *Server) removeBundles(ids []string) (int, error) {
+	var gone []string
+	var first error
+	removed := 0
+	for _, id := range ids {
+		err := os.Remove(s.bundlePath(id))
+		switch {
+		case err == nil:
+			removed++
+			gone = append(gone, id)
+		case errors.Is(err, os.ErrNotExist):
+			gone = append(gone, id)
+		case first == nil:
+			first = err
+		}
+	}
+	if err := s.DB.ForgetBundles(gone); err != nil && first == nil {
+		first = err
+	}
+	return removed, first
+}
+
 // PurgeBundles removes expired bundles, and files left by an upload that never finished or
 // that have no record. Housekeeping calls it; it returns how many files it removed.
 func (s *Server) PurgeBundles() (int, error) {
 	if s.BundleDir == "" {
 		return 0, nil
 	}
-	removed := 0
 	ids, err := s.DB.ExpiredBundles()
 	if err != nil {
 		return 0, err
 	}
-	for _, id := range ids {
-		if err := os.Remove(s.bundlePath(id)); err == nil {
-			removed++
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return removed, err
-		}
-	}
-	if err := s.DB.ForgetBundles(ids); err != nil {
-		return removed, err
-	}
+	removed, first := s.removeBundles(ids) // one file that cannot go does not stop the rest
 	entries, err := os.ReadDir(s.BundleDir)
 	if err != nil {
 		return removed, err
@@ -305,12 +346,18 @@ func (s *Server) PurgeBundles() (int, error) {
 			continue // a running upload, or one just finished and not yet recorded
 		}
 		id := strings.TrimSuffix(name, ".tmp")
-		if !validBundleID(id) || (name == id && s.DB.KnownBundle(id)) {
-			continue // not ours, or a live bundle
+		if !validBundleID(id) {
+			continue // not ours
+		}
+		if name == id {
+			known, err := s.DB.KnownBundle(id)
+			if err != nil || known {
+				continue // a live bundle, or we cannot tell: keep it
+			}
 		}
 		if os.Remove(filepath.Join(s.BundleDir, name)) == nil {
 			removed++
 		}
 	}
-	return removed, nil
+	return removed, first
 }
