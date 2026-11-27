@@ -164,6 +164,9 @@ func main() {
 	}
 	srv.StaticDir = os.Getenv("UCDOTWEB_STATIC_DIR")
 	srv.AbuseContact = os.Getenv("UCDOTWEB_ABUSE_CONTACT")
+	if c := srv.AbuseContact; c != "" && !strings.HasPrefix(c, "mailto:") && !strings.HasPrefix(c, "https://") && !strings.HasPrefix(c, "tel:") {
+		logger.Fatalf("UCDOTWEB_ABUSE_CONTACT: want a URI (RFC 9116), like mailto:abuse@example.org")
+	}
 	srv.BundleDir = os.Getenv("UCDOTWEB_BUNDLE_DIR")
 	if srv.BundleDir == "" {
 		srv.BundleDir = filepath.Join(filepath.Dir(need("UCDOTWEB_DB")), "bundles")

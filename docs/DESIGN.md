@@ -916,7 +916,8 @@ The owners answered four open points, each with the first option offered:
 
 Abuse contact: `abuse@ucos.ensui.dev`, a Cloudflare e-mail forward the owner sets up. With
 `UCDOTWEB_ABUSE_CONTACT` set, the server answers `/.well-known/security.txt` (RFC 9116) with
-the contact, an expiry one year ahead and the language.
+the contact (it must be a mailto:, https: or tel: URI, or the server will not start), an
+expiry 180 days after the server started, and the language.
 
 Also built in this round:
 

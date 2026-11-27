@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -66,10 +67,10 @@ func (s *Server) Handler() http.Handler {
 	s.safetyRoutes(mux)
 	s.bundleRoutes(mux)
 	if s.AbuseContact != "" {
-		mux.HandleFunc("GET /.well-known/security.txt", s.securityTxt)
+		mux.HandleFunc("GET /.well-known/security.txt", s.securityTxt(time.Now().AddDate(0, 0, 180).Truncate(time.Second)))
 	}
 	if s.StaticDir != "" {
-		mux.Handle("/", staticHeaders(http.FileServer(http.Dir(s.StaticDir))))
+		mux.Handle("/", staticHeaders(http.FileServer(plainDir{http.Dir(s.StaticDir)})))
 	}
 	if s.Proxy != nil {
 		mux.Handle("/proxy/", s.Proxy)
@@ -357,15 +358,21 @@ func (s *Server) isMaintainer(claims map[string]any) bool {
 
 // securityTxt publishes the abuse contact (RFC 9116), as the threat model asks before the
 // relay opens to members.
-func (s *Server) securityTxt(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	fmt.Fprintf(w, "Contact: %s\nExpires: %s\nPreferred-Languages: en, pt\n",
-		s.AbuseContact, time.Now().AddDate(1, 0, 0).UTC().Format(time.RFC3339))
+// securityTxt answers /.well-known/security.txt (RFC 9116). Expires is fixed when the routes
+// are built, 180 days ahead: under the year the RFC allows, and it does not move with every
+// request. A server that runs past it publishes a stale date, which is what the field is for.
+func (s *Server) securityTxt(expires time.Time) http.HandlerFunc {
+	body := fmt.Sprintf("Contact: %s\nExpires: %s\nPreferred-Languages: en, pt\n",
+		s.AbuseContact, expires.UTC().Format(time.RFC3339))
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		fmt.Fprint(w, body)
+	}
 }
 
-// staticHeaders gives the OS's files the headers the OS's own Caddyfile sets in production
-// (deploy/Caddyfile in the OS repository): the enforced Content-Security-Policy, and no
-// caching of the page and the boot files so a new build shows at once.
+// staticHeaders gives the OS's files, for local tests, the enforced Content-Security-Policy
+// of the OS's own Caddyfile (deploy/Caddyfile in the OS repository), and no caching on every
+// file (the Caddyfile does that only for the page and boot files) so a rebuild shows at once.
 func staticHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -383,4 +390,29 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("X-Frame-Options", "DENY")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// plainDir serves files only: no file or folder whose name starts with a dot, and no listing
+// of a folder that has no index.html.
+type plainDir struct{ d http.Dir }
+
+func (p plainDir) Open(name string) (http.File, error) {
+	for _, part := range strings.Split(name, "/") {
+		if strings.HasPrefix(part, ".") {
+			return nil, os.ErrNotExist
+		}
+	}
+	f, err := p.d.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	if st, err := f.Stat(); err == nil && st.IsDir() {
+		idx, err := p.d.Open(strings.TrimSuffix(name, "/") + "/index.html")
+		if err != nil {
+			f.Close()
+			return nil, os.ErrNotExist
+		}
+		idx.Close()
+	}
+	return f, nil
 }

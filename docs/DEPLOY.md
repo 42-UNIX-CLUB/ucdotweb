@@ -172,6 +172,7 @@ curl -s http://127.0.0.1:8090/.well-known/security.txt    # Contact, Expires, Pr
 `UCDOTWEB_STATIC_DIR` (local tests only) makes the service also serve a folder at `/`, for
 example an OS build's `dist`, so a browser on one local port gets the page and the platform
 together. Leave it unset on a server: there the page is served in front of the service.
+It serves files only: no folder listings and nothing whose name starts with a dot.
 
 ### 2.7 systemd units (server)
 

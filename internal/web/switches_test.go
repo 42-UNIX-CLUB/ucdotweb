@@ -191,6 +191,19 @@ func TestStaticAndSecurityTxt(t *testing.T) {
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "Contact: mailto:abuse@ucos.ensui.dev") || !strings.Contains(rec.Body.String(), "Expires: ") {
 		t.Fatalf("security.txt: %d %q", rec.Code, rec.Body.String())
 	}
+	if err := os.Mkdir(dir+"/sub", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir+"/.secret", []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"/sub/", "/.secret"} { // no listing, no dot files
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", p, nil))
+		if rec.Code != 404 {
+			t.Errorf("static %s: %d, want 404", p, rec.Code)
+		}
+	}
 	rec = httptest.NewRecorder()
 	(&Server{DB: db}).Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 	if rec.Code != 404 {
