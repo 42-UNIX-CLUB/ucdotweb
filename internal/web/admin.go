@@ -210,7 +210,7 @@ func (s *Server) adminGrant(w http.ResponseWriter, r *http.Request, v Viewer) {
 }
 
 func quotaJSON(q store.Quota) map[string]any {
-	return map[string]any{"bytes_per_day": q.BytesPerDay, "conns": q.Conns, "dests_per_min": q.DestsPerMin, "reqs_per_min": q.ReqsPerMin}
+	return map[string]any{"bytes_per_day": q.BytesPerDay, "conns": q.Conns, "dests_per_min": q.DestsPerMin, "reqs_per_min": q.ReqsPerMin, "bundle_bytes": q.BundleBytes}
 }
 
 func (s *Server) adminQuotas(w http.ResponseWriter, r *http.Request, _ Viewer) {
@@ -233,18 +233,19 @@ func (s *Server) adminSetQuota(w http.ResponseWriter, r *http.Request, v Viewer)
 		Conns       *int   `json:"conns"`
 		DestsPerMin *int   `json:"dests_per_min"`
 		ReqsPerMin  *int   `json:"reqs_per_min"`
+		BundleBytes *int64 `json:"bundle_bytes"`
 	}
 	if err := decode(r, &in); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	// every limit must be given: a forgotten field must not silently become "no limit" (0)
-	if in.BytesPerDay == nil || in.Conns == nil || in.DestsPerMin == nil || in.ReqsPerMin == nil {
-		http.Error(w, "Give all four limits (0 means no limit of that kind).", http.StatusBadRequest)
+	if in.BytesPerDay == nil || in.Conns == nil || in.DestsPerMin == nil || in.ReqsPerMin == nil || in.BundleBytes == nil {
+		http.Error(w, "Give all five limits (0 means no limit of that kind).", http.StatusBadRequest)
 		return
 	}
-	q := store.Quota{BytesPerDay: *in.BytesPerDay, Conns: *in.Conns, DestsPerMin: *in.DestsPerMin, ReqsPerMin: *in.ReqsPerMin}
-	if q.BytesPerDay < 0 || q.Conns < 0 || q.DestsPerMin < 0 || q.ReqsPerMin < 0 {
+	q := store.Quota{BytesPerDay: *in.BytesPerDay, Conns: *in.Conns, DestsPerMin: *in.DestsPerMin, ReqsPerMin: *in.ReqsPerMin, BundleBytes: *in.BundleBytes}
+	if q.BytesPerDay < 0 || q.Conns < 0 || q.DestsPerMin < 0 || q.ReqsPerMin < 0 || q.BundleBytes < 0 {
 		http.Error(w, "Limits cannot be negative.", http.StatusBadRequest)
 		return
 	}

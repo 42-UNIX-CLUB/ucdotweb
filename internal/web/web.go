@@ -39,6 +39,9 @@ type Server struct {
 	AdminFresh time.Duration
 	// Safety is the safety watcher; nil makes GET /api/admin/safety answer 503.
 	Safety *safety.Watcher
+	// BundleDir holds device-transfer bundles, one file each; empty leaves /api/bundles out.
+	BundleDir string
+	bundles   bundleState
 }
 
 // Handler returns the routes.
@@ -51,6 +54,7 @@ func (s *Server) Handler() http.Handler {
 	s.adminRoutes(mux)
 	s.allowlistRoutes(mux)
 	s.safetyRoutes(mux)
+	s.bundleRoutes(mux)
 	if s.Proxy != nil {
 		mux.Handle("/proxy/", s.Proxy)
 	}

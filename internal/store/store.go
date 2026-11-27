@@ -87,8 +87,8 @@ CREATE TABLE IF NOT EXISTS audit (
 );
 CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit BEGIN SELECT RAISE(ABORT, 'audit is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit BEGIN SELECT RAISE(ABORT, 'audit is append-only'); END;
-INSERT OR IGNORE INTO quotas VALUES ('user',   2000000000, 0, 0, 120);
-INSERT OR IGNORE INTO quotas VALUES ('member', 2500000000, 8, 15, 120);
+INSERT OR IGNORE INTO quotas (tier, bytes_per_day, conns, dests_per_min, reqs_per_min) VALUES ('user',   2000000000, 0, 0, 120);
+INSERT OR IGNORE INTO quotas (tier, bytes_per_day, conns, dests_per_min, reqs_per_min) VALUES ('member', 2500000000, 8, 15, 120);
 `
 
 // Open opens or creates the database file. key encrypts session data at rest (32 bytes,
@@ -114,7 +114,12 @@ func Open(path string, key []byte) (*DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("store: schema: %w", err)
 	}
-	return &DB{sql: db, aead: aead, now: time.Now}, nil
+	d := &DB{sql: db, aead: aead, now: time.Now}
+	if err := d.ensureBundles(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return d, nil
 }
 
 // Close closes the database.
@@ -278,13 +283,14 @@ type Quota struct {
 	Conns       int
 	DestsPerMin int
 	ReqsPerMin  int
+	BundleBytes int64 // bytes the user may keep in pending device-transfer bundles
 }
 
 // GetQuota reads a tier's limits.
 func (d *DB) GetQuota(tier string) (Quota, error) {
 	var q Quota
-	err := d.sql.QueryRow(`SELECT bytes_per_day, conns, dests_per_min, reqs_per_min FROM quotas WHERE tier = ?`, tier).
-		Scan(&q.BytesPerDay, &q.Conns, &q.DestsPerMin, &q.ReqsPerMin)
+	err := d.sql.QueryRow(`SELECT bytes_per_day, conns, dests_per_min, reqs_per_min, bundle_bytes FROM quotas WHERE tier = ?`, tier).
+		Scan(&q.BytesPerDay, &q.Conns, &q.DestsPerMin, &q.ReqsPerMin, &q.BundleBytes)
 	return q, err
 }
 
@@ -402,7 +408,7 @@ func (d *DB) ListUsers(query string, limit, offset int) ([]UserRow, error) {
 
 // SetQuota changes a tier's limits, with an audit entry. Only existing tiers can change.
 func (d *DB) SetQuota(actor, tier string, q Quota) error {
-	if q.BytesPerDay < 0 || q.Conns < 0 || q.DestsPerMin < 0 || q.ReqsPerMin < 0 {
+	if q.BytesPerDay < 0 || q.Conns < 0 || q.DestsPerMin < 0 || q.ReqsPerMin < 0 || q.BundleBytes < 0 {
 		return errors.New("store: limits cannot be negative")
 	}
 	tx, err := d.sql.Begin()
@@ -410,8 +416,8 @@ func (d *DB) SetQuota(actor, tier string, q Quota) error {
 		return err
 	}
 	defer tx.Rollback()
-	r, err := tx.Exec(`UPDATE quotas SET bytes_per_day = ?, conns = ?, dests_per_min = ?, reqs_per_min = ? WHERE tier = ?`,
-		q.BytesPerDay, q.Conns, q.DestsPerMin, q.ReqsPerMin, tier)
+	r, err := tx.Exec(`UPDATE quotas SET bytes_per_day = ?, conns = ?, dests_per_min = ?, reqs_per_min = ?, bundle_bytes = ? WHERE tier = ?`,
+		q.BytesPerDay, q.Conns, q.DestsPerMin, q.ReqsPerMin, q.BundleBytes, tier)
 	if err != nil {
 		return err
 	}
@@ -419,8 +425,8 @@ func (d *DB) SetQuota(actor, tier string, q Quota) error {
 		return errors.New("store: no such tier")
 	}
 	if _, err := tx.Exec(`INSERT INTO audit (at, actor, action, target, detail) VALUES (?, ?, 'set quota', ?, ?)`,
-		d.now().Unix(), actor, tier, fmt.Sprintf("bytes/day %d, connections %d, destinations/min %d, requests/min %d",
-			q.BytesPerDay, q.Conns, q.DestsPerMin, q.ReqsPerMin)); err != nil {
+		d.now().Unix(), actor, tier, fmt.Sprintf("bytes/day %d, connections %d, destinations/min %d, requests/min %d, bundle bytes %d",
+			q.BytesPerDay, q.Conns, q.DestsPerMin, q.ReqsPerMin, q.BundleBytes)); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -428,7 +434,7 @@ func (d *DB) SetQuota(actor, tier string, q Quota) error {
 
 // Quotas returns every tier's limits.
 func (d *DB) Quotas() (map[string]Quota, error) {
-	rows, err := d.sql.Query(`SELECT tier, bytes_per_day, conns, dests_per_min, reqs_per_min FROM quotas`)
+	rows, err := d.sql.Query(`SELECT tier, bytes_per_day, conns, dests_per_min, reqs_per_min, bundle_bytes FROM quotas`)
 	if err != nil {
 		return nil, err
 	}
@@ -437,7 +443,7 @@ func (d *DB) Quotas() (map[string]Quota, error) {
 	for rows.Next() {
 		var t string
 		var q Quota
-		if err := rows.Scan(&t, &q.BytesPerDay, &q.Conns, &q.DestsPerMin, &q.ReqsPerMin); err != nil {
+		if err := rows.Scan(&t, &q.BytesPerDay, &q.Conns, &q.DestsPerMin, &q.ReqsPerMin, &q.BundleBytes); err != nil {
 			return nil, err
 		}
 		out[t] = q

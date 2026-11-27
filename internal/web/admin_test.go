@@ -125,23 +125,26 @@ func TestAdminQuotas(t *testing.T) {
 	if code, _ := post(t, c, r, "/api/admin/quotas", `{"tier":"member","bytes_per_day":1000}`); code != http.StatusBadRequest {
 		t.Fatal("partial quota accepted (missing limits would become 'no limit')")
 	}
-	if code, _ := post(t, c, r, "/api/admin/quotas", `{"tier":"member","bytes_per_day":-1,"conns":1,"dests_per_min":1,"reqs_per_min":1}`); code != http.StatusBadRequest {
+	if code, _ := post(t, c, r, "/api/admin/quotas", `{"tier":"member","bytes_per_day":-1,"conns":1,"dests_per_min":1,"reqs_per_min":1,"bundle_bytes":1}`); code != http.StatusBadRequest {
 		t.Fatal("negative quota accepted")
 	}
-	if code, _ := post(t, c, r, "/api/admin/quotas", `{"tier":"gold","bytes_per_day":1,"conns":1,"dests_per_min":1,"reqs_per_min":1}`); code != http.StatusBadRequest {
+	if code, _ := post(t, c, r, "/api/admin/quotas", `{"tier":"gold","bytes_per_day":1,"conns":1,"dests_per_min":1,"reqs_per_min":1,"bundle_bytes":1}`); code != http.StatusBadRequest {
 		t.Fatal("unknown tier accepted")
 	}
-	if code, b := post(t, c, r, "/api/admin/quotas", `{"tier":"member","bytes_per_day":1000,"conns":4,"dests_per_min":10,"reqs_per_min":60}`); code != http.StatusNoContent {
+	if code, _ := post(t, c, r, "/api/admin/quotas", `{"tier":"member","bytes_per_day":1000,"conns":4,"dests_per_min":10,"reqs_per_min":60}`); code != http.StatusBadRequest {
+		t.Fatal("quota without bundle_bytes accepted")
+	}
+	if code, b := post(t, c, r, "/api/admin/quotas", `{"tier":"member","bytes_per_day":1000,"conns":4,"dests_per_min":10,"reqs_per_min":60,"bundle_bytes":7000}`); code != http.StatusNoContent {
 		t.Fatalf("set quota: %d %s", code, b)
 	}
 	q, err := r.db.GetQuota("member")
-	if err != nil || q.BytesPerDay != 1000 || q.Conns != 4 || q.DestsPerMin != 10 || q.ReqsPerMin != 60 {
+	if err != nil || q.BytesPerDay != 1000 || q.Conns != 4 || q.DestsPerMin != 10 || q.ReqsPerMin != 60 || q.BundleBytes != 7000 {
 		t.Fatalf("stored quota %+v %v", q, err)
 	}
 	var out struct {
 		Quotas map[string]map[string]float64 `json:"quotas"`
 	}
-	if getJSON(t, c, r, "/api/admin/quotas", &out); out.Quotas["member"]["conns"] != 4 || out.Quotas["user"]["reqs_per_min"] != 120 {
+	if getJSON(t, c, r, "/api/admin/quotas", &out); out.Quotas["member"]["conns"] != 4 || out.Quotas["user"]["reqs_per_min"] != 120 || out.Quotas["user"]["bundle_bytes"] != 50e6 {
 		t.Fatalf("quota view: %v", out.Quotas)
 	}
 }
