@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/42-UNIX-CLUB/ucdotweb/internal/netguard"
 	"github.com/42-UNIX-CLUB/ucdotweb/internal/store"
@@ -216,7 +217,8 @@ func TestLogKeepsHostOnly(t *testing.T) {
 func TestGuardRefusesPrivate(t *testing.T) {
 	g := &netguard.Guard{}
 	for _, s := range []string{"127.0.0.1", "10.1.2.3", "169.254.169.254", "192.168.1.1", "100.64.0.1", "::1",
-		"fd00::1", "fe80::1", "::ffff:127.0.0.1", "::ffff:10.0.0.1", "0.0.0.0", "224.0.0.1"} {
+		"fd00::1", "fe80::1", "::ffff:127.0.0.1", "::ffff:10.0.0.1", "0.0.0.0", "224.0.0.1",
+		"64:ff9b::a00:1", "64:ff9b::7f00:1", "2002:a00:1::1", "2002:c0a8:101::1"} { // NAT64 and 6to4 hold an IPv4 address
 		if g.Allowed(netip.MustParseAddr(s)) {
 			t.Errorf("%s allowed", s)
 		}
@@ -271,5 +273,39 @@ func TestPlatformCap(t *testing.T) {
 	var outcome string
 	if err := r.db.QueryRow(`SELECT outcome FROM conn_log`, &outcome); err != nil || outcome != "platform cap" {
 		t.Fatalf("log %q %v", outcome, err)
+	}
+}
+
+func TestZeroByteQuotaMeansNoLimit(t *testing.T) {
+	r := newRig(t, true)
+	if err := r.db.SetQuota("admin", "user", store.Quota{BytesPerDay: 0}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		resp := r.get(t, "/proxy/deb.debian.org/debian/dists/stable/InRelease", true)
+		b, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil || resp.StatusCode != 200 || len(b) != 1000 {
+			t.Fatalf("request %d: status %d, %d bytes, err %v", i, resp.StatusCode, len(b), err)
+		}
+	}
+}
+
+func TestPruneDropsIdleUsers(t *testing.T) {
+	p := &Proxy{}
+	old := time.Now().Add(-2 * time.Minute)
+	p.windows = map[string][]time.Time{"idle": {old}, "busy": {time.Now()}}
+	p.used = map[string]*dayUse{"yesterday": {day: "2000-01-01", bytes: 5}, "today": {day: store.Day(time.Now()), bytes: 7}}
+	p.mu.Lock()
+	p.prune(time.Now())
+	p.mu.Unlock()
+	if _, ok := p.windows["idle"]; ok || len(p.windows) != 1 {
+		t.Fatalf("windows after prune: %v", p.windows)
+	}
+	if _, ok := p.used["yesterday"]; ok || len(p.used) != 1 {
+		t.Fatalf("used after prune: %v", p.used)
+	}
+	if p.take("new", 10, 0) != 10 { // an entry that was never loaded must not crash take
+		t.Fatal("take on a missing entry")
 	}
 }

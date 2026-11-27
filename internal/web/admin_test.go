@@ -170,3 +170,25 @@ func TestAdminFlagsAndConns(t *testing.T) {
 		t.Fatalf("all conns: %v", cs.Conns)
 	}
 }
+
+func TestAdminContentTypeParameters(t *testing.T) {
+	r, c := adminRig(t)
+	for ct, want := range map[string]int{
+		"application/json; charset=utf-8": http.StatusNoContent,
+		"Application/JSON":                http.StatusNoContent,
+		"text/plain":                      http.StatusBadRequest,
+		"application/json; =":             http.StatusBadRequest,
+	} {
+		req, _ := http.NewRequest("POST", r.app.URL+"/api/admin/flag", strings.NewReader(`{"name":"relay_off","on":true}`))
+		req.Header.Set("Content-Type", ct)
+		req.Header.Set("Origin", r.app.URL)
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Errorf("Content-Type %q: status %d, want %d", ct, resp.StatusCode, want)
+		}
+	}
+}

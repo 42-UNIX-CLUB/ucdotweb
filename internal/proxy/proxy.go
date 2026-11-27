@@ -85,6 +85,7 @@ type Proxy struct {
 	mu      sync.Mutex
 	windows map[string][]time.Time // requests in the last minute, per user
 	used    map[string]*dayUse     // bytes today per user, counted per chunk across requests
+	swept   time.Time              // last prune of windows and used, under mu
 	once    sync.Once
 
 	snap   atomic.Pointer[snapshot] // the store's list as last loaded
@@ -126,6 +127,13 @@ func (p *Proxy) take(subject string, n, limit int64) int64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	u := p.used[subject]
+	if u == nil { // usedToday normally made it; never dereference a missing entry
+		if p.used == nil {
+			p.used = map[string]*dayUse{}
+		}
+		u = &dayUse{day: store.Day(time.Now())}
+		p.used[subject] = u
+	}
 	if limit > 0 && u.bytes+n > limit {
 		n = limit - u.bytes
 		if n < 0 {
@@ -209,12 +217,13 @@ func isRelease(path string) bool {
 
 // rate records a request and reports whether the user is within requests per minute.
 func (p *Proxy) rate(subject string, limit int) bool {
-	if limit <= 0 {
-		return true
-	}
 	now := time.Now()
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.prune(now)
+	if limit <= 0 {
+		return true
+	}
 	if p.windows == nil {
 		p.windows = map[string][]time.Time{}
 	}
@@ -230,6 +239,27 @@ func (p *Proxy) rate(subject string, limit int) bool {
 	}
 	p.windows[subject] = append(w, now)
 	return true
+}
+
+// prune drops, at most once a minute, the windows of users with no request in the last
+// minute and the byte counts of earlier days, so the maps do not grow with every user ever
+// seen. A dropped count is loaded again from the database when needed. Called under mu.
+func (p *Proxy) prune(now time.Time) {
+	if now.Sub(p.swept) < time.Minute {
+		return
+	}
+	p.swept = now
+	for s, w := range p.windows {
+		if len(w) == 0 || now.Sub(w[len(w)-1]) > time.Minute {
+			delete(p.windows, s)
+		}
+	}
+	day := store.Day(now)
+	for s, u := range p.used {
+		if u.day != day {
+			delete(p.used, s)
+		}
+	}
 }
 
 var passReq = []string{"Accept", "Range", "If-Modified-Since", "If-None-Match", "If-Range", "Git-Protocol", "Content-Type"}
@@ -296,7 +326,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusTooManyRequests, "Too many requests. Wait a minute.")
 		return
 	}
-	if q.BytesPerDay > 0 && p.usedToday(subject) >= q.BytesPerDay {
+	if used := p.usedToday(subject); q.BytesPerDay > 0 && used >= q.BytesPerDay {
 		_ = p.DB.LogConn(subject, kind, host, 0, "daily quota")
 		fail(w, http.StatusTooManyRequests, "Daily proxy quota reached. It resets at 00:00 UTC.")
 		return

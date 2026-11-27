@@ -3,6 +3,7 @@ package web
 import (
 	"encoding/json"
 	"errors"
+	"mime"
 	"net/http"
 	"strconv"
 	"time"
@@ -90,7 +91,7 @@ func (s *Server) adminChange(h adminHandler) http.HandlerFunc {
 			http.Error(w, "Cross-site request refused.", http.StatusForbidden)
 			return
 		}
-		if r.Header.Get("Content-Type") != "application/json" {
+		if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
 			http.Error(w, "Expected a JSON body.", http.StatusBadRequest)
 			return
 		}
