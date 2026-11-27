@@ -54,7 +54,7 @@ func TestBundleMigration(t *testing.T) {
 	}
 	defer d.Close()
 	q, err := d.GetQuota("member")
-	if err != nil || q.BytesPerDay != 123 || q.ReqsPerMin != 6 || q.BundleBytes != DefaultBundleBytes {
+	if err != nil || q.BytesPerDay != 123 || q.ReqsPerMin != 6 || q.BundleBytes != DefaultBundleBytes || q.StreamsPerMin != DefaultStreamsPerMin {
 		t.Fatalf("migrated quota %+v %v", q, err)
 	}
 	d.Close()

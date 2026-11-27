@@ -63,7 +63,10 @@ recommends").
 - Volume: per-user daily bytes and connection limits; global caps below the VPS allowance
   [design].
 - Our IP blocklisted or the host account closed: the automatic global suspension and the panic
-  switches [design]; an abuse contact address published [decided].
+  switches [design]; an abuse contact address published: `abuse@ucos.ensui.dev` in
+  `/.well-known/security.txt` [built].
+- Stream churn and proxy pile-up: at most 60 new relay streams a minute per member (an admin
+  setting) and 8 running proxy requests per user [built].
 
 ### Identity and sessions
 - Forged identity: the service accepts only the Clubroom's signed tokens or introspection

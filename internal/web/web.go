@@ -6,6 +6,7 @@ package web
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -40,6 +41,13 @@ type Server struct {
 	AdminFresh time.Duration
 	// Safety is the safety watcher; nil makes GET /api/admin/safety answer 503.
 	Safety *safety.Watcher
+	// StaticDir, when set, is served at / for every path no route takes: the OS's dist
+	// folder, so one process gives one origin for local tests. Production puts Caddy in front
+	// instead (DEPLOY.md). Empty: nothing is served at /.
+	StaticDir string
+	// AbuseContact, when set (for example mailto:abuse@ucos.ensui.dev), is published at
+	// /.well-known/security.txt.
+	AbuseContact string
 	// BundleDir holds device-transfer bundles, one file each; empty leaves /api/bundles out.
 	BundleDir string
 	bundles   bundleState
@@ -57,6 +65,12 @@ func (s *Server) Handler() http.Handler {
 	s.allowlistRoutes(mux)
 	s.safetyRoutes(mux)
 	s.bundleRoutes(mux)
+	if s.AbuseContact != "" {
+		mux.HandleFunc("GET /.well-known/security.txt", s.securityTxt)
+	}
+	if s.StaticDir != "" {
+		mux.Handle("/", staticHeaders(http.FileServer(http.Dir(s.StaticDir))))
+	}
 	if s.Proxy != nil {
 		mux.Handle("/proxy/", s.Proxy)
 	}
@@ -129,7 +143,14 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "This platform is not taking new accounts for now. Try again later.", http.StatusServiceUnavailable)
 		return
 	}
-	u, err := s.DB.SeenUser(ident.Subject, login)
+	// the name shown in the admin views and /api/me: the 42 login when linked, else the
+	// Clubroom's own name (preferred_username). Display only: the bootstrap reads "login"
+	// together with ft_linked (isMaintainer), never this.
+	display := login
+	if display == "" {
+		display, _ = ident.Claims["preferred_username"].(string)
+	}
+	u, err := s.DB.SeenUser(ident.Subject, display)
 	if err != nil {
 		s.Log.Printf("sign-in: recording the user failed: %v", err)
 		http.Error(w, "Sign-in failed. Try again later.", http.StatusInternalServerError)
@@ -262,7 +283,7 @@ func ftActive(claims map[string]any) bool {
 // CheckRelay is the relay's re-check: the session still exists, belongs to the subject,
 // and the user is a member and not banned.
 func (s *Server) CheckRelay(subject, sidHash string) error {
-	d, ok := s.Sessions.GetByHash(sidHash)
+	d, ok := s.Sessions.KeepAlive(sidHash) // relay use counts as activity
 	if !ok {
 		return errors.New("signed out")
 	}
@@ -332,6 +353,26 @@ func (s *Server) isMaintainer(claims map[string]any) bool {
 		}
 	}
 	return false
+}
+
+// securityTxt publishes the abuse contact (RFC 9116), as the threat model asks before the
+// relay opens to members.
+func (s *Server) securityTxt(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprintf(w, "Contact: %s\nExpires: %s\nPreferred-Languages: en, pt\n",
+		s.AbuseContact, time.Now().AddDate(1, 0, 0).UTC().Format(time.RFC3339))
+}
+
+// staticHeaders gives the OS's files the headers the OS's own Caddyfile sets in production
+// (deploy/Caddyfile in the OS repository): the enforced Content-Security-Policy, and no
+// caching of the page and the boot files so a new build shows at once.
+func staticHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Content-Security-Policy", "object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+		h.Set("Cache-Control", "no-cache")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func securityHeaders(next http.Handler) http.Handler {

@@ -54,7 +54,7 @@ var (
 	// DefaultLimitOutcomes: the relay logs the first four today; "rate limited" and the
 	// proxy's and the relay upgrade's "daily quota" are proposed for the call sites that
 	// refuse without logging yet.
-	DefaultLimitOutcomes = []string{"too many connections", "too many destinations", "daily quota",
+	DefaultLimitOutcomes = []string{"too many connections", "too many destinations", "too many streams", "daily quota",
 		"cut at daily quota", "rate limited"}
 	// DefaultLimitSuffixes: the proxy logs "{status} cut at quota" when a download stops at the quota.
 	DefaultLimitSuffixes = []string{" cut at quota"}

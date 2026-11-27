@@ -85,6 +85,7 @@ type Proxy struct {
 	mu      sync.Mutex
 	windows map[string][]time.Time // requests in the last minute, per user
 	limited map[string]bool        // users refused since their last allowed request
+	running map[string]int         // requests in progress per user, at most maxRunning
 	used    map[string]*dayUse     // bytes today per user, counted per chunk across requests
 	swept   time.Time              // last prune of windows and used, under mu
 	once    sync.Once
@@ -211,8 +212,11 @@ func isGit(method, path, rawQuery, ctype string) bool {
 // once the upstream server normalises the path.
 func badPath(path string) bool {
 	l := strings.ToLower(path)
+	// %25 (an encoded percent sign) is refused too: a server that decodes twice would turn
+	// %252f into a slash (decided 2026-11-27, at the cost of file names with a literal %)
 	return strings.Contains(l, "/../") || strings.HasSuffix(l, "/..") || strings.Contains(l, "/./") ||
-		strings.Contains(l, "%2e") || strings.Contains(l, "%2f") || strings.Contains(l, "%5c") || strings.Contains(l, "\\")
+		strings.Contains(l, "%2e") || strings.Contains(l, "%2f") || strings.Contains(l, "%5c") || strings.Contains(l, "%25") ||
+		strings.Contains(l, "\\")
 }
 
 func isRelease(path string) bool {
@@ -279,7 +283,12 @@ var passReq = []string{"Accept", "Range", "If-Modified-Since", "If-None-Match", 
 var passResp = []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Last-Modified", "ETag",
 	"Content-Encoding", "Cache-Control", "Expires"}
 
-func fail(w http.ResponseWriter, code int, msg string) {
+// RefusedHeader names, on every refusal the proxy itself makes, why it refused. Answers that
+// come from the far end never carry it, so a client can tell the two apart.
+const RefusedHeader = "X-UCOS-Proxy-Refused"
+
+func fail(w http.ResponseWriter, code int, why, msg string) {
+	w.Header().Set(RefusedHeader, why)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(code)
@@ -290,33 +299,33 @@ func fail(w http.ResponseWriter, code int, msg string) {
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// A header a cross-site page cannot send without a CORS preflight, which we never answer.
 	if r.Header.Get("X-UCOS-Proxy") != "1" {
-		fail(w, http.StatusForbidden, "Missing X-UCOS-Proxy header.")
+		fail(w, http.StatusForbidden, "no-header", "Missing X-UCOS-Proxy header.")
 		return
 	}
 	subject, ok := p.Who(r)
 	if !ok {
-		fail(w, http.StatusUnauthorized, "Sign in to use the proxy.")
+		fail(w, http.StatusUnauthorized, "signed-out", "Sign in to use the proxy.")
 		return
 	}
 	if p.DB.Flag("proxy_off") || p.DB.Flag("all_off") {
-		fail(w, http.StatusServiceUnavailable, "The proxy is switched off by the administrators.")
+		fail(w, http.StatusServiceUnavailable, "off", "The proxy is switched off by the administrators.")
 		return
 	}
 	u, err := p.DB.GetUser(subject)
 	if err != nil || u.Banned {
-		fail(w, http.StatusForbidden, "This account may not use the proxy.")
+		fail(w, http.StatusForbidden, "banned", "This account may not use the proxy.")
 		return
 	}
 	rest := strings.TrimPrefix(r.URL.EscapedPath(), "/proxy/")
 	host, path, _ := strings.Cut(rest, "/")
 	path = "/" + path
 	if host == "" || len(host) > 253 || strings.Contains(host, "@") || badPath(path) {
-		fail(w, http.StatusBadRequest, "Bad host or path.")
+		fail(w, http.StatusBadRequest, "bad-path", "Bad host or path.")
 		return
 	}
 	q, err := p.DB.GetQuota("user")
 	if err != nil {
-		fail(w, http.StatusInternalServerError, "Quota unavailable.")
+		fail(w, http.StatusInternalServerError, "unavailable", "Quota unavailable.")
 		return
 	}
 	// the rate limit comes before anything is logged, so refused requests are limited too,
@@ -325,34 +334,41 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if first {
 			_ = p.DB.LogConn(subject, kind, host, 0, "rate limited")
 		}
-		fail(w, http.StatusTooManyRequests, "Too many requests. Wait a minute.")
+		fail(w, http.StatusTooManyRequests, "rate", "Too many requests. Wait a minute.")
 		return
 	}
 	rules, err := p.rules()
 	if err != nil {
-		fail(w, http.StatusServiceUnavailable, "The proxy's list is unavailable. Try again later.")
+		fail(w, http.StatusServiceUnavailable, "unavailable", "The proxy's list is unavailable. Try again later.")
 		return
 	}
 	if !allowed(rules, r.Method, host, path, r.URL.RawQuery, r.Header.Get("Content-Type")) {
 		_ = p.DB.LogConn(subject, kind, host, 0, "not allowed")
-		fail(w, http.StatusForbidden, "This host or path is not on the proxy's list.")
+		fail(w, http.StatusForbidden, "not-listed", "This host or path is not on the proxy's list.")
 		return
 	}
 	if p.DB.CapReached(kind) {
 		_ = p.DB.LogConn(subject, kind, host, 0, "platform cap")
-		fail(w, http.StatusServiceUnavailable, "The platform's daily proxy limit is reached. It resets at 00:00 UTC.")
+		fail(w, http.StatusServiceUnavailable, "cap", "The platform's daily proxy limit is reached. It resets at 00:00 UTC.")
 		return
 	}
 	used, err := p.usedToday(subject)
 	if err != nil {
-		fail(w, http.StatusServiceUnavailable, "Quota unavailable. Try again later.")
+		fail(w, http.StatusServiceUnavailable, "unavailable", "Quota unavailable. Try again later.")
 		return
 	}
 	if q.BytesPerDay > 0 && used >= q.BytesPerDay {
 		_ = p.DB.LogConn(subject, kind, host, 0, "daily quota")
-		fail(w, http.StatusTooManyRequests, "Daily proxy quota reached. It resets at 00:00 UTC.")
+		fail(w, http.StatusTooManyRequests, "quota", "Daily proxy quota reached. It resets at 00:00 UTC.")
 		return
 	}
+
+	if !p.begin(subject) {
+		_ = p.DB.LogConn(subject, kind, host, 0, "too many at once")
+		fail(w, http.StatusTooManyRequests, "busy", "Too many proxy requests at once. Wait for one to finish.")
+		return
+	}
+	defer p.end(subject)
 
 	target := "https://" + host + path
 	if r.URL.RawQuery != "" {
@@ -367,7 +383,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// ever sent). The 10-minute limit below covers a body that stalls.
 		if r.ContentLength > maxPostBody {
 			_ = p.DB.LogConn(subject, kind, host, 0, "body too large")
-			fail(w, http.StatusRequestEntityTooLarge, "The request body is over 8 MiB.")
+			fail(w, http.StatusRequestEntityTooLarge, "too-large", "The request body is over 8 MiB.")
 			return
 		}
 		capped = &cappedBody{r: r.Body, left: maxPostBody}
@@ -396,7 +412,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	resp, err := c.Do(up)
 	if err != nil && capped != nil && capped.over.Load() {
 		_ = p.DB.LogConn(subject, kind, host, 0, "body too large")
-		fail(w, http.StatusRequestEntityTooLarge, "The request body is over 8 MiB.")
+		fail(w, http.StatusRequestEntityTooLarge, "too-large", "The request body is over 8 MiB.")
 		return
 	}
 	if err != nil {
@@ -405,7 +421,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			outcome = "blocked address"
 		}
 		_ = p.DB.LogConn(subject, kind, host, 0, outcome)
-		fail(w, http.StatusBadGateway, "The upstream request failed.")
+		fail(w, http.StatusBadGateway, "upstream", "The upstream request failed.")
 		return
 	}
 	defer resp.Body.Close()
@@ -505,6 +521,32 @@ func (c *cappedBody) Read(p []byte) (int, error) {
 }
 
 var errBodyTooLarge = errors.New("proxy: request body over the limit")
+
+// maxRunning is how many proxy requests one user may have in progress at once (decided
+// 2026-11-27: a cap, 8). Each running request holds a goroutine and an upstream connection
+// for up to 10 minutes. Refusals are bounded by the rate limit, which comes first.
+const maxRunning = 8
+
+func (p *Proxy) begin(subject string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.running == nil {
+		p.running = map[string]int{}
+	}
+	if p.running[subject] >= maxRunning {
+		return false
+	}
+	p.running[subject]++
+	return true
+}
+
+func (p *Proxy) end(subject string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.running[subject]--; p.running[subject] <= 0 {
+		delete(p.running, subject)
+	}
+}
 
 // maxPostBody is the largest POST body passed on (git's clone negotiation is far smaller).
 const maxPostBody = 8 << 20

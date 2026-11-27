@@ -15,6 +15,8 @@
 //	UCDOTWEB_RELAY_PORTS    optional, comma-separated destination ports (default 80,443)
 //	UCDOTWEB_ADMIN_FRESH    optional: how recently an administrator must have signed in to change anything (default 15m)
 //	UCDOTWEB_BUNDLE_DIR     optional: where device-transfer bundles are kept (default: a "bundles" directory beside the database)
+//	UCDOTWEB_STATIC_DIR     optional: a folder served at / (the OS's dist), for one origin in local tests
+//	UCDOTWEB_ABUSE_CONTACT  optional: published at /.well-known/security.txt, for example mailto:abuse@ucos.ensui.dev
 //	UCDOTWEB_INSECURE_COOKIES=1  only for local tests over plain http
 //
 // Safety automation (all optional; see internal/safety):
@@ -160,6 +162,8 @@ func main() {
 		}
 		srv.AdminFresh = d
 	}
+	srv.StaticDir = os.Getenv("UCDOTWEB_STATIC_DIR")
+	srv.AbuseContact = os.Getenv("UCDOTWEB_ABUSE_CONTACT")
 	srv.BundleDir = os.Getenv("UCDOTWEB_BUNDLE_DIR")
 	if srv.BundleDir == "" {
 		srv.BundleDir = filepath.Join(filepath.Dir(need("UCDOTWEB_DB")), "bundles")
