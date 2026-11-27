@@ -199,6 +199,20 @@ func (rl *Relay) release(sub string) {
 	}
 }
 
+// FlushAll writes every user's pending usage to the database. The server calls it when it
+// stops, so the bytes of open sockets since their last 10-second flush are not lost.
+func (rl *Relay) FlushAll() {
+	rl.mu.Lock()
+	all := make(map[string]*userState, len(rl.users))
+	for sub, us := range rl.users {
+		all[sub] = us
+	}
+	rl.mu.Unlock()
+	for sub, us := range all {
+		rl.flush(sub, us)
+	}
+}
+
 // usedToday returns today's bytes for the user, counting what is not flushed yet.
 func (rl *Relay) usedToday(sub string, us *userState) int64 {
 	day := store.Day(time.Now())

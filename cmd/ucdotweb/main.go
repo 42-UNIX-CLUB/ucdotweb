@@ -38,9 +38,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/42-UNIX-CLUB/ucdotweb/internal/oidc"
@@ -133,7 +135,8 @@ func main() {
 			ports = append(ports, n)
 		}
 	}
-	srv.Relay = &relay.Relay{Verifier: verifier, DB: db, Origin: origin, Check: srv.CheckRelay, Ports: ports, Log: logger}
+	rl := &relay.Relay{Verifier: verifier, DB: db, Origin: origin, Check: srv.CheckRelay, Ports: ports, Log: logger}
+	srv.Relay = rl
 	safetyCfg, err := safety.ConfigFromEnv(os.Getenv)
 	if err != nil {
 		logger.Fatalf("safety: %v", err)
@@ -179,5 +182,24 @@ func main() {
 	hs := &http.Server{Addr: need("UCDOTWEB_LISTEN"), Handler: srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 	logger.Printf("listening on %s for %s", hs.Addr, origin)
-	logger.Fatal(hs.ListenAndServe())
+	// On SIGTERM (systemctl stop or restart) or Ctrl-C: stop taking requests, give running
+	// proxy requests up to 20 seconds to finish (they write their usage when they end), then
+	// write the relay's pending usage, so a restart loses as little as possible.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+	errc := make(chan error, 1)
+	go func() { errc <- hs.ListenAndServe() }()
+	select {
+	case err := <-errc:
+		logger.Fatal(err)
+	case <-ctx.Done():
+	}
+	logger.Printf("stopping")
+	sctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	if err := hs.Shutdown(sctx); err != nil {
+		logger.Printf("shutdown: %v (requests still running were cut)", err)
+	}
+	cancel()
+	rl.FlushAll()
+	logger.Printf("stopped")
 }

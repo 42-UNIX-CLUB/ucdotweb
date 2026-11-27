@@ -878,3 +878,10 @@ The remaining open points of 15.11 (anonymous `/auth/login` rows, the admin boot
   server that decodes twice could be led out with `%25`; the listed mirrors are not known to
   do that. Refusing `%25` would close it and also refuse file names with a literal percent
   sign: open, for the owners.
+- Proxy: a POST body over 8 MiB is refused with 413 instead of being cut and sent on. The
+  log says why a download ended early: "cut at quota", "cut at time limit" (the 10 minutes a
+  request may last), "upstream error" or "client gone".
+- Shutdown: on SIGTERM or Ctrl-C the server stops taking requests, gives running proxy
+  requests up to 20 seconds to finish and write their usage, then writes the relay's pending
+  usage. systemd's default stop timeout (90 s) leaves room for it. A proxy download still
+  running after 20 seconds is cut, and its bytes since the start are not counted.

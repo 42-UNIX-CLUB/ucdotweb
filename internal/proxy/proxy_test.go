@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"io"
@@ -307,5 +308,55 @@ func TestPruneDropsIdleUsers(t *testing.T) {
 	}
 	if p.take("new", 10, 0) != 10 { // an entry that was never loaded must not crash take
 		t.Fatal("take on a missing entry")
+	}
+}
+
+func (r *rig) post(t *testing.T, path, ctype string, body []byte) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest("POST", r.front.URL+path, bytes.NewReader(body))
+	req.Header.Set("X-UCOS-Proxy", "1")
+	req.Header.Set("Content-Type", ctype)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// A POST body over 8 MiB is refused, not cut and sent on; a small one goes through.
+func TestLargePostRefused(t *testing.T) {
+	r := newRig(t, true)
+	const path = "/proxy/github.com/a/b.git/git-upload-pack"
+	const ct = "application/x-git-upload-pack-request"
+	resp := r.post(t, path, ct, make([]byte, maxPostBody+1))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("a body of 8 MiB + 1: status %d, want 413", resp.StatusCode)
+	}
+	hits := r.hits.Load()
+	resp = r.post(t, path, ct, []byte("0032want 0000"))
+	resp.Body.Close()
+	if r.hits.Load() != hits+1 {
+		t.Fatalf("a small body did not reach the upstream (status %d)", resp.StatusCode)
+	}
+	if r.hits.Load() != 1 {
+		t.Fatalf("the refused body reached the upstream")
+	}
+}
+
+// A body cut by the request's time limit is logged as such, not as a plain status.
+func TestCopyEndOutcomes(t *testing.T) {
+	p := &Proxy{}
+	pr, pw := io.Pipe()
+	pw.CloseWithError(context.DeadlineExceeded)
+	rec := httptest.NewRecorder()
+	if _, end := p.copyQuota(rec, pr, "u1", 0); end != endUpstream {
+		t.Fatalf("a failed read ended as %d, want endUpstream", end)
+	}
+	if _, end := p.copyQuota(rec, strings.NewReader("abc"), "u1", 0); end != endDone {
+		t.Fatalf("a whole body ended as %d, want endDone", end)
+	}
+	if _, end := p.copyQuota(rec, strings.NewReader("abcdef"), "u2", 3); end != endQuota {
+		t.Fatalf("a body over the quota ended as %d, want endQuota", end)
 	}
 }
