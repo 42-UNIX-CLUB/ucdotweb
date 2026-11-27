@@ -26,8 +26,10 @@ and notifies by chat webhook and e-mail when those are configured (`cmd/ucdotweb
 lists the variables). Also: switches for sign-in and new sign-ups, a recent sign-in for admin
 changes, 42-based membership that follows the 42 account's own state (the Clubroom's
 `ft_active` claim), and daily caps per service for the whole platform (docs/DESIGN.md 15.8
-and 15.9). Not built yet: the admin program (a UC.OS program,
-decided).
+and 15.9). The server side of moving UC.OS data between devices: encrypted bundles held
+until the expiry the user picks, for the same account only (`/api/bundles`, docs/DESIGN.md
+15.10). Not built yet: the admin program (a UC.OS program, decided), and the OS side of the
+bundles (encryption, the QR code).
 
 Go standard library plus one module: github.com/mattn/go-sqlite3 (cgo, needs a C compiler). Tests: `go test ./...` (add `-race` for the race detector).
 
@@ -53,7 +55,7 @@ UCDOTWEB_ADMIN_LOGINS=rucosta UCDOTWEB_INSECURE_COOKIES=1 go run ./cmd/ucdotweb
 | `internal/jose` | JWS verification (EdDSA, RS256, ES256) and EdDSA signing; JWK sets |
 | `internal/oidc` | the OpenID Connect client: discovery, PKCE, code exchange, ID token checks |
 | `internal/session` | server-side sessions behind an HttpOnly cookie |
-| `internal/web` | the HTTP routes: `/auth/login`, `/auth/callback`, `/auth/logout`, `/api/me`, `/api/relay-token`; `admin.go`: the admin API |
+| `internal/web` | the HTTP routes: `/auth/login`, `/auth/callback`, `/auth/logout`, `/api/me`, `/api/relay-token`; `admin.go`: the admin API; `bundles.go`: device-transfer bundles |
 | `internal/standin`, `cmd/oidc-standin` | the test identity provider (loopback only) |
 | `internal/store` | the SQLite database: sessions, users, quotas, usage, switches, logs, audit |
 | `internal/netguard` | which addresses may be reached; a dialer that checks every resolved address |

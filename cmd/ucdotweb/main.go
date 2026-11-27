@@ -14,6 +14,7 @@
 //	UCDOTWEB_RELAY_KEY_FILE a file holding 64 hex characters: the Ed25519 seed that signs relay tokens
 //	UCDOTWEB_RELAY_PORTS    optional, comma-separated destination ports (default 80,443)
 //	UCDOTWEB_ADMIN_FRESH    optional: how recently an administrator must have signed in to change anything (default 15m)
+//	UCDOTWEB_BUNDLE_DIR     optional: where device-transfer bundles are kept (default: a "bundles" directory beside the database)
 //	UCDOTWEB_INSECURE_COOKIES=1  only for local tests over plain http
 //
 // Safety automation (all optional; see internal/safety):
@@ -37,6 +38,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -152,12 +154,22 @@ func main() {
 		}
 		srv.AdminFresh = d
 	}
+	srv.BundleDir = os.Getenv("UCDOTWEB_BUNDLE_DIR")
+	if srv.BundleDir == "" {
+		srv.BundleDir = filepath.Join(filepath.Dir(need("UCDOTWEB_DB")), "bundles")
+	}
+	if err := os.MkdirAll(srv.BundleDir, 0o700); err != nil {
+		logger.Fatalf("bundle directory: %v", err)
+	}
 	go watcher.Run(context.Background())
-	go func() { // housekeeping: expired sessions, connection logs past 30 days, old report summaries
+	go func() { // housekeeping: expired sessions, connection logs past 30 days, old report summaries, expired bundles
 		for {
 			_, _ = db.SessionPurge(idle, absolute)
 			_, _ = db.PurgeLogs(30 * 24 * time.Hour)
 			_, _ = db.EraseOldReportSummaries(365 * 24 * time.Hour) // decided: report summaries kept 12 months
+			if _, err := srv.PurgeBundles(); err != nil {
+				logger.Printf("bundles: purge: %v", err)
+			}
 			time.Sleep(time.Hour)
 		}
 	}()

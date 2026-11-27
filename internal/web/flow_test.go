@@ -55,7 +55,7 @@ func newRig(t *testing.T, claims map[string]any) *rig {
 	r.db = db
 	r.sessions = session.NewWith(db, 30*time.Minute, 12*time.Hour, false)
 	srv := &Server{Provider: prov, Sessions: r.sessions, Origin: appSrv.URL, Log: log.New(io.Discard, "", 0),
-		DB: db, AdminLogins: []string{"Maintainer"}}
+		DB: db, AdminLogins: []string{"Maintainer"}, BundleDir: t.TempDir()}
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	srv.Minter = &relay.Minter{Issuer: appSrv.URL, Kid: "k", Key: priv}
 	r.verifier, _ = relay.NewVerifier(appSrv.URL, "k", pub)

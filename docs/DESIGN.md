@@ -679,3 +679,39 @@ This replaces "expires each school year, renewable by re-linking" (section 14 an
   counts as active, so nobody loses the role before the Clubroom ships it (`ftActive` in
   `internal/web/web.go`).
 - An administrator's member grant still counts on its own, whatever the claim says.
+
+### 15.10 Device-transfer bundles: the server side (2026-11-27)
+
+Option b of 15.1 (decided 15.3): the OS encrypts a bundle in the browser with a random key,
+uploads only the ciphertext, and shows a QR code holding the bundle id and the key. The owner
+answered the three open numbers on 2026-11-27:
+
+- **Who may download:** the same account only. Another account, or a missing or expired
+  bundle, all get the same 404.
+- **Space:** a per-tier limit on the bytes a user keeps in pending bundles, `bundle_bytes` in
+  the quotas table, set by administrators through `POST /api/admin/quotas` (now five limits,
+  all required). Default 50 MB for both tiers. 0 means no limit, as for every quota.
+- **Longest expiry:** 30 days. The user picks it per bundle (`expires_in`, 60 seconds to 30
+  days).
+
+Built (`internal/web/bundles.go`, `internal/store/bundles.go`):
+
+| Route | What |
+|---|---|
+| `POST /api/bundles?expires_in=SECONDS` | body: the ciphertext as `application/octet-stream`, from our own origin. Answers 201 with `id`, `size`, `expires_at` |
+| `GET /api/bundles` | the user's pending bundles, `used` and `limit` |
+| `GET /api/bundles/{id}` | the ciphertext, as a download (`attachment`, `sandbox`, `no-store`) |
+| `DELETE /api/bundles/{id}` | removes it at once, from our own origin |
+
+Mechanical choices, reversible:
+- A bundle is a file named by its id in `UCDOTWEB_BUNDLE_DIR` (default: `bundles` beside the
+  database), not a database row, so large bundles do not pass through SQLite. The id is 128
+  random bits.
+- One upload at a time per user (a second gets 409), so the space check cannot be raced.
+- Housekeeping, hourly, removes expired bundles and stray files more than an hour old.
+- Any signed-in user may upload: the design names no role for it.
+- Not built: an administrator view of bundles or a way to delete another user's. The server
+  cannot read them, so there is nothing to moderate; ask if one is wanted.
+
+Left for the OS (uc-os-dev): the bundle format, the encryption, and the QR code. 15.1 also
+plans an offline encrypted file export (option c) first, built entirely in the OS.
