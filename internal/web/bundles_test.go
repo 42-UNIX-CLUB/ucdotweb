@@ -212,7 +212,30 @@ func TestPurgeBundles(t *testing.T) {
 	if strings.Join(names, ",") != live+",README" {
 		t.Fatalf("left: %v", names)
 	}
-	if r.db.KnownBundle(expired) {
+	if known, _ := r.db.KnownBundle(expired); known {
 		t.Fatal("expired record kept")
+	}
+}
+
+func TestPurgeGoesOnPastAFileItCannotRemove(t *testing.T) {
+	r := newRig(t, map[string]any{"login": "someone", "status": "active"})
+	dir := r.srv.BundleDir
+	stuck, fine := strings.Repeat("0a", 16), strings.Repeat("0b", 16)
+	// a directory in place of a bundle file: os.Remove fails on it because it is not empty
+	if err := os.MkdirAll(filepath.Join(dir, stuck, "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(dir, fine), []byte("x"), 0o600)
+	_ = r.db.AddBundle(stuck, "u", 1, time.Now().Add(-time.Second))
+	_ = r.db.AddBundle(fine, "u", 1, time.Now().Add(-time.Second))
+	n, err := r.srv.PurgeBundles()
+	if err == nil || n != 1 {
+		t.Fatalf("purged %d, %v; want 1 and the error for the stuck one", n, err)
+	}
+	if known, _ := r.db.KnownBundle(fine); known {
+		t.Fatal("the removable bundle's record was kept")
+	}
+	if known, _ := r.db.KnownBundle(stuck); !known {
+		t.Fatal("the stuck bundle's record was dropped while its file is still there")
 	}
 }

@@ -84,6 +84,7 @@ type Proxy struct {
 
 	mu      sync.Mutex
 	windows map[string][]time.Time // requests in the last minute, per user
+	limited map[string]bool        // users refused since their last allowed request
 	used    map[string]*dayUse     // bytes today per user, counted per chunk across requests
 	swept   time.Time              // last prune of windows and used, under mu
 	once    sync.Once
@@ -215,14 +216,15 @@ func isRelease(path string) bool {
 	return len(parts) == 4 && (parts[2] == "releases" && strings.HasPrefix(parts[3], "download/") || parts[2] == "archive")
 }
 
-// rate records a request and reports whether the user is within requests per minute.
-func (p *Proxy) rate(subject string, limit int) bool {
+// rate records a request and reports whether the user is within requests per minute, and
+// for a refusal whether it is the first since the user's last allowed request.
+func (p *Proxy) rate(subject string, limit int) (ok, first bool) {
 	now := time.Now()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.prune(now)
 	if limit <= 0 {
-		return true
+		return true, false
 	}
 	if p.windows == nil {
 		p.windows = map[string][]time.Time{}
@@ -235,10 +237,16 @@ func (p *Proxy) rate(subject string, limit int) bool {
 	w = w[i:]
 	if len(w) >= limit {
 		p.windows[subject] = w
-		return false
+		if p.limited == nil {
+			p.limited = map[string]bool{}
+		}
+		first = !p.limited[subject]
+		p.limited[subject] = true
+		return false, first
 	}
 	p.windows[subject] = append(w, now)
-	return true
+	delete(p.limited, subject)
+	return true, false
 }
 
 // prune drops, at most once a minute, the windows of users with no request in the last
@@ -252,6 +260,7 @@ func (p *Proxy) prune(now time.Time) {
 	for s, w := range p.windows {
 		if len(w) == 0 || now.Sub(w[len(w)-1]) > time.Minute {
 			delete(p.windows, s)
+			delete(p.limited, s)
 		}
 	}
 	day := store.Day(now)
@@ -297,8 +306,22 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.EscapedPath(), "/proxy/")
 	host, path, _ := strings.Cut(rest, "/")
 	path = "/" + path
-	if host == "" || strings.Contains(host, "@") || badPath(path) {
+	if host == "" || len(host) > 253 || strings.Contains(host, "@") || badPath(path) {
 		fail(w, http.StatusBadRequest, "Bad host or path.")
+		return
+	}
+	q, err := p.DB.GetQuota("user")
+	if err != nil {
+		fail(w, http.StatusInternalServerError, "Quota unavailable.")
+		return
+	}
+	// the rate limit comes before anything is logged, so refused requests are limited too,
+	// and only the first refusal of a burst writes a row
+	if ok, first := p.rate(subject, q.ReqsPerMin); !ok {
+		if first {
+			_ = p.DB.LogConn(subject, kind, host, 0, "rate limited")
+		}
+		fail(w, http.StatusTooManyRequests, "Too many requests. Wait a minute.")
 		return
 	}
 	rules, err := p.rules()
@@ -311,19 +334,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusForbidden, "This host or path is not on the proxy's list.")
 		return
 	}
-	q, err := p.DB.GetQuota("user")
-	if err != nil {
-		fail(w, http.StatusInternalServerError, "Quota unavailable.")
-		return
-	}
 	if p.DB.CapReached(kind) {
 		_ = p.DB.LogConn(subject, kind, host, 0, "platform cap")
 		fail(w, http.StatusServiceUnavailable, "The platform's daily proxy limit is reached. It resets at 00:00 UTC.")
-		return
-	}
-	if !p.rate(subject, q.ReqsPerMin) {
-		_ = p.DB.LogConn(subject, kind, host, 0, "rate limited")
-		fail(w, http.StatusTooManyRequests, "Too many requests. Wait a minute.")
 		return
 	}
 	if used := p.usedToday(subject); q.BytesPerDay > 0 && used >= q.BytesPerDay {

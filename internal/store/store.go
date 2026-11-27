@@ -340,10 +340,16 @@ func (d *DB) SetFlag(actor, name string, on bool) error {
 }
 
 // Flag reads a panic switch; unknown switches are off.
+//
+// A switch that cannot be read counts as ON: a panic switch must fail closed, as the proxy's
+// allow-list does. A switch never set (no row) is off.
 func (d *DB) Flag(name string) bool {
 	var v int
-	_ = d.sql.QueryRow(`SELECT on_ FROM flags WHERE name = ?`, name).Scan(&v)
-	return v != 0
+	err := d.sql.QueryRow(`SELECT on_ FROM flags WHERE name = ?`, name).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false
+	}
+	return err != nil || v != 0
 }
 
 // ---- logs ----
