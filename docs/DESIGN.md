@@ -890,3 +890,9 @@ The remaining open points of 15.11 (anonymous `/auth/login` rows, the admin boot
   usage. systemd's default stop timeout (90 s) leaves room for it. A proxy download still
   running after 20 seconds is cut, and its bytes since the start are not counted. Relay
   streams still open at that moment get their bytes counted but no connection log row.
+- Every refusal that writes a log row now shares the per-user, per-kind allowance (10 rows a
+  minute each): refused CONNECTs, streams whose dial failed (blocked address, unreachable,
+  timeout), and relay upgrades refused at the daily quota. Streams that did connect are
+  always logged.
+- The daily byte counters fail closed: if today's usage cannot be read, the proxy and the
+  relay answer 503 "Quota unavailable" instead of counting the day from zero.
