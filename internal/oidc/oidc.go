@@ -88,7 +88,11 @@ type Pending struct {
 }
 
 // Start returns the authorize URL and the values to keep until the callback.
-func (p *Provider) Start() (string, Pending) {
+func (p *Provider) Start() (string, Pending) { return p.StartWith(nil) }
+
+// StartWith is Start with extra authorization request parameters, for example prompt=login.
+// They cannot replace the ones Start sets.
+func (p *Provider) StartWith(extra url.Values) (string, Pending) {
 	pd := Pending{State: Random(32), Nonce: Random(32), Verifier: Random(48), Created: p.nowFunc()}
 	ch := sha256.Sum256([]byte(pd.Verifier))
 	q := url.Values{
@@ -100,6 +104,11 @@ func (p *Provider) Start() (string, Pending) {
 		"nonce":                 {pd.Nonce},
 		"code_challenge":        {base64.RawURLEncoding.EncodeToString(ch[:])},
 		"code_challenge_method": {"S256"},
+	}
+	for k, v := range extra {
+		if _, set := q[k]; !set {
+			q[k] = v
+		}
 	}
 	sep := "?"
 	if strings.Contains(p.authURL, "?") {
