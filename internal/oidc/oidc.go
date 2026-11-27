@@ -79,7 +79,8 @@ func Discover(ctx context.Context, cfg Config, hc *http.Client) (*Provider, erro
 }
 
 // Pending holds what must survive between the redirect to the provider and the callback.
-// The server keeps it in the pre-login session, never in the URL.
+// The server keeps it in a sealed, short-lived cookie (internal/web/pending.go), never in
+// the URL.
 type Pending struct {
 	State    string
 	Nonce    string

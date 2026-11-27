@@ -7,6 +7,7 @@ package store
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -23,6 +24,7 @@ import (
 type DB struct {
 	sql  *sql.DB
 	aead cipher.AEAD
+	key  []byte // the database key, kept only to derive keys for other purposes (DeriveKey)
 	now  func() time.Time
 	caps capState
 }
@@ -42,7 +44,7 @@ CREATE TABLE IF NOT EXISTS users (
 	first_seen   INTEGER NOT NULL,
 	last_seen    INTEGER NOT NULL,
 	member_grant INTEGER NOT NULL DEFAULT 0,
-	member_until INTEGER NOT NULL DEFAULT 0,
+	member_until INTEGER NOT NULL DEFAULT 0, -- unused since the member role follows ft_active (DESIGN 15.9)
 	admin_grant  INTEGER NOT NULL DEFAULT 0,
 	banned       INTEGER NOT NULL DEFAULT 0,
 	ban_reason   TEXT NOT NULL DEFAULT ''
@@ -114,7 +116,7 @@ func Open(path string, key []byte) (*DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("store: schema: %w", err)
 	}
-	d := &DB{sql: db, aead: aead, now: time.Now}
+	d := &DB{sql: db, aead: aead, key: append([]byte(nil), key...), now: time.Now}
 	if err := d.ensureBundles(); err != nil {
 		db.Close()
 		return nil, err
@@ -124,6 +126,15 @@ func Open(path string, key []byte) (*DB, error) {
 
 // Close closes the database.
 func (d *DB) Close() error { return d.sql.Close() }
+
+// DeriveKey returns a 32-byte key for another purpose: HMAC-SHA256 of the label under the
+// database key. Different labels give unrelated keys, and none of them reveals the database
+// key, so no second secret file is needed.
+func (d *DB) DeriveKey(label string) []byte {
+	m := hmac.New(sha256.New, d.key)
+	m.Write([]byte(label))
+	return m.Sum(nil)
+}
 
 // HashID turns a session id into the key stored: a leaked database gives no usable cookie.
 func HashID(id string) string {
@@ -210,8 +221,7 @@ func (d *DB) SessionCount() int {
 type User struct {
 	Subject     string
 	Login       string
-	MemberGrant bool      // granted by an administrator
-	MemberUntil time.Time // a 42 link's member role lasts until here (end of the school year)
+	MemberGrant bool // granted by an administrator
 	AdminGrant  bool
 	Banned      bool
 	BanReason   string
@@ -232,16 +242,12 @@ func (d *DB) SeenUser(subject, login string) (User, error) {
 func (d *DB) GetUser(subject string) (User, error) {
 	var u User
 	var mg, ag, b int
-	var mu int64
-	err := d.sql.QueryRow(`SELECT subject, login, member_grant, member_until, admin_grant, banned, ban_reason
-		FROM users WHERE subject = ?`, subject).Scan(&u.Subject, &u.Login, &mg, &mu, &ag, &b, &u.BanReason)
+	err := d.sql.QueryRow(`SELECT subject, login, member_grant, admin_grant, banned, ban_reason
+		FROM users WHERE subject = ?`, subject).Scan(&u.Subject, &u.Login, &mg, &ag, &b, &u.BanReason)
 	if err != nil {
 		return u, err
 	}
 	u.MemberGrant, u.AdminGrant, u.Banned = mg != 0, ag != 0, b != 0
-	if mu != 0 {
-		u.MemberUntil = time.Unix(mu, 0)
-	}
 	return u, nil
 }
 
@@ -387,7 +393,7 @@ type UserRow struct {
 
 // ListUsers returns users, most recently seen first. query filters on the login (substring).
 func (d *DB) ListUsers(query string, limit, offset int) ([]UserRow, error) {
-	rows, err := d.sql.Query(`SELECT subject, login, member_grant, member_until, admin_grant, banned, ban_reason,
+	rows, err := d.sql.Query(`SELECT subject, login, member_grant, admin_grant, banned, ban_reason,
 		first_seen, last_seen FROM users WHERE instr(lower(login), lower(?)) > 0
 		ORDER BY last_seen DESC LIMIT ? OFFSET ?`, query, limit, offset)
 	if err != nil {
@@ -398,14 +404,11 @@ func (d *DB) ListUsers(query string, limit, offset int) ([]UserRow, error) {
 	for rows.Next() {
 		var u UserRow
 		var mg, ag, b int
-		var mu, fs, ls int64
-		if err := rows.Scan(&u.Subject, &u.Login, &mg, &mu, &ag, &b, &u.BanReason, &fs, &ls); err != nil {
+		var fs, ls int64
+		if err := rows.Scan(&u.Subject, &u.Login, &mg, &ag, &b, &u.BanReason, &fs, &ls); err != nil {
 			return nil, err
 		}
 		u.MemberGrant, u.AdminGrant, u.Banned = mg != 0, ag != 0, b != 0
-		if mu != 0 {
-			u.MemberUntil = time.Unix(mu, 0)
-		}
 		u.FirstSeen, u.LastSeen = time.Unix(fs, 0), time.Unix(ls, 0)
 		out = append(out, u)
 	}

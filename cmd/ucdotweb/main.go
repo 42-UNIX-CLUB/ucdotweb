@@ -8,8 +8,8 @@
 //	UCDOTWEB_CLIENT_ID      our client id at the provider
 //	UCDOTWEB_SECRET_FILE    a file holding the client secret (one line)
 //	UCDOTWEB_DB             the SQLite database file
-//	UCDOTWEB_DB_KEY_FILE    a file holding 64 hex characters (32 bytes): encrypts sessions at rest
-//	UCDOTWEB_ADMIN_LOGINS   comma-separated 42 logins of the maintainers (administrators)
+//	UCDOTWEB_DB_KEY_FILE    a file holding 64 hex characters (32 bytes): encrypts sessions at rest; seals the pending sign-in cookie
+//	UCDOTWEB_ADMIN_LOGINS   comma-separated 42 logins of the maintainers (administrators); counts only with ft_linked true
 //	UCDOTWEB_PROXY_RULES    optional JSON file that seeds the proxy's allow-list on the first start only (default: built in)
 //	UCDOTWEB_RELAY_KEY_FILE a file holding 64 hex characters: the Ed25519 seed that signs relay tokens
 //	UCDOTWEB_RELAY_PORTS    optional, comma-separated destination ports (default 80,443)
@@ -38,9 +38,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/42-UNIX-CLUB/ucdotweb/internal/oidc"
@@ -75,6 +77,9 @@ func hexFile(logger *log.Logger, env string, n int) []byte {
 func main() {
 	logger := log.New(os.Stderr, "ucdotweb: ", log.LstdFlags)
 	origin := need("UCDOTWEB_ORIGIN")
+	if err := web.CheckOrigin(origin); err != nil {
+		logger.Fatalf("UCDOTWEB_ORIGIN: %v", err) // every Origin check compares this exact string
+	}
 	secret, err := os.ReadFile(need("UCDOTWEB_SECRET_FILE"))
 	if err != nil {
 		logger.Fatalf("reading the client secret file: %v", err)
@@ -130,7 +135,8 @@ func main() {
 			ports = append(ports, n)
 		}
 	}
-	srv.Relay = &relay.Relay{Verifier: verifier, DB: db, Origin: origin, Check: srv.CheckRelay, Ports: ports, Log: logger}
+	rl := &relay.Relay{Verifier: verifier, DB: db, Origin: origin, Check: srv.CheckRelay, Ports: ports, Log: logger}
+	srv.Relay = rl
 	safetyCfg, err := safety.ConfigFromEnv(os.Getenv)
 	if err != nil {
 		logger.Fatalf("safety: %v", err)
@@ -176,5 +182,24 @@ func main() {
 	hs := &http.Server{Addr: need("UCDOTWEB_LISTEN"), Handler: srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 	logger.Printf("listening on %s for %s", hs.Addr, origin)
-	logger.Fatal(hs.ListenAndServe())
+	// On SIGTERM (systemctl stop or restart) or Ctrl-C: stop taking requests, give running
+	// proxy requests up to 20 seconds to finish (they write their usage when they end), then
+	// write the relay's pending usage, so a restart loses as little as possible.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+	errc := make(chan error, 1)
+	go func() { errc <- hs.ListenAndServe() }()
+	select {
+	case err := <-errc:
+		logger.Fatal(err)
+	case <-ctx.Done():
+	}
+	logger.Printf("stopping")
+	sctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	if err := hs.Shutdown(sctx); err != nil {
+		logger.Printf("shutdown: %v (requests still running were cut)", err)
+	}
+	cancel()
+	rl.FlushAll()
+	logger.Printf("stopped")
 }

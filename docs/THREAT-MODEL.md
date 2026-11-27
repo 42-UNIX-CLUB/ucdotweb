@@ -69,7 +69,8 @@ recommends").
 - Forged identity: the service accepts only the Clubroom's signed tokens or introspection
   results, checks issuer, audience (the UC.OS client), expiry and the UC.OS scope [design].
 - OAuth attacks on the code flow: PKCE, an exact redirect URI, a `state` value bound to the
-  browser's pre-login cookie, and a `nonce` with OpenID Connect [decided, standard].
+  browser's pre-login cookie (sealed with AES-GCM, 10 minutes; DESIGN.md 15.12), and a
+  `nonce` with OpenID Connect [decided, standard].
 - Session theft: the session cookie is `HttpOnly`, `Secure`, `SameSite=Lax` (or `Strict` for
   admin paths), `__Host-` prefixed, rotated at sign-in, with an idle and an absolute expiry
   [decided].
@@ -92,7 +93,7 @@ recommends").
   admin actions need a fresh sign-in within the last N minutes [decided]; every admin action
   in the audit log [design].
 - Insider misuse: the audit log is append-only from the application's point of view and lists
-  who did what; administrators are the maintainers and bootstrapped by 42 login [design].
+  who did what; administrators are the maintainers and bootstrapped by 42 login, for an account with a linked 42 account only [design].
 - Panic switch itself abused (denial of service by an admin): logged; only administrators
   [design].
 
@@ -140,6 +141,6 @@ that had no recommendation yet, these were made and are recorded as accepted:
 1. **Abuse contact**: an address on the club's domain is published before the relay goes live.
    Which address is the owner's to create.
 2. **VPS provider**: chosen only after reading its acceptable-use policy for a members-only
-   relay; uc-os-web reads the candidates' policies when hosting is set up.
+   relay; the candidates' policies are read when hosting is set up.
 3. **Connection logs** carry only the pseudonymous Clubroom user id, not the 42 login; an
    administrator maps the id to a person when handling a complaint.

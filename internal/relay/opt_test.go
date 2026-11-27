@@ -193,3 +193,15 @@ func TestUserStateIdle(t *testing.T) {
 		t.Fatal("an open socket must keep the state")
 	}
 }
+
+// FlushAll writes the usage of open sockets that the 10-second flush has not written yet.
+func TestFlushAllWritesPendingUsage(t *testing.T) {
+	r := newRig(t)
+	us := r.rl.acquire("u9")
+	r.rl.account(us, 1234, 0)
+	r.rl.FlushAll()
+	if b, _, _ := r.db.UsageToday("u9", "relay"); b != 1234 {
+		t.Fatalf("usage after FlushAll: %d, want 1234", b)
+	}
+	r.rl.release("u9")
+}

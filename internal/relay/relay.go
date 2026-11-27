@@ -44,9 +44,13 @@ const (
 	buffer          = 128 // DATA packets a client may send per stream before waiting for CONTINUE
 	// maxQueued is the most client bytes a stream may have waiting for the far end. Credit
 	// counts packets and a packet may be 1 MiB, so without it one stream could make the relay
-	// hold 128 MiB. 128 TCP segments are under 200 KB: an honest client never reaches it.
-	maxQueued         = 1 << 20
-	refusalLogsPerMin = 10 // refused CONNECTs logged per user a minute; the rest are only answered
+	// hold 128 MiB. The OS's client sends DATA packets of up to 64 KiB, so a full credit of
+	// those (128 x 64 KiB = 8 MiB) must fit: an honest client never reaches the cap.
+	maxQueued = buffer * 64 << 10
+	// refusalLogsPerMin is how many refused CONNECTs of each outcome are logged per user a
+	// minute; the rest are only answered. Per outcome, so a flood of one kind (a refused port)
+	// cannot hide a limit trip that the safety watcher and the administrators read.
+	refusalLogsPerMin = 10
 	tokenPrefix       = "ucos-token."
 	recheckInterval   = 5 * time.Second
 	usageFlushPeriod  = 10 * time.Second
@@ -80,15 +84,18 @@ type userState struct {
 	refs    int
 	// refusals logged in the current minute, so a client cannot fill the log with refusals
 	refusedAt time.Time
-	refused   int
+	refused   map[string]int // outcome -> refusals in the minute from refusedAt
 }
 
 // idle reports whether the state can be dropped: no socket, nothing to write, and no
-// destination counted in the last minute (else closing and reopening the socket would
-// reset the destinations-a-minute limit). Called under rl.mu.
+// destination or logged refusal counted in the last minute (else closing and reopening the
+// socket would reset those limits). Called under rl.mu.
 func (us *userState) idle(now time.Time) bool {
 	if us.refs > 0 || us.pending > 0 {
 		return false
+	}
+	if us.refused != nil && now.Sub(us.refusedAt) <= time.Minute {
+		return false // keeps the count of logged refusals for its minute
 	}
 	for _, t := range us.dests {
 		if now.Sub(t) <= time.Minute {
@@ -149,8 +156,15 @@ func (rl *Relay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	us := rl.acquire(claims.Sub)
 	defer rl.release(claims.Sub)
-	if q.BytesPerDay > 0 && rl.usedToday(claims.Sub, us) >= q.BytesPerDay {
-		_ = rl.DB.LogConn(claims.Sub, "relay", "", 0, "daily quota")
+	used, err := rl.usedToday(claims.Sub, us)
+	if err != nil {
+		http.Error(w, "Quota unavailable.", http.StatusServiceUnavailable)
+		return
+	}
+	if q.BytesPerDay > 0 && used >= q.BytesPerDay {
+		if rl.logAllowed(us, "daily quota") {
+			_ = rl.DB.LogConn(claims.Sub, "relay", "", 0, "daily quota")
+		}
 		http.Error(w, "Daily relay quota reached. It resets at 00:00 UTC.", http.StatusTooManyRequests)
 		return
 	}
@@ -158,7 +172,8 @@ func (rl *Relay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	s := &session{rl: rl, c: c, sub: claims.Sub, sid: claims.Sid, q: q, us: us, streams: map[uint32]*stream{}}
+	s := &session{rl: rl, c: c, sub: claims.Sub, sid: claims.Sid, us: us, streams: map[uint32]*stream{}}
+	s.q.Store(&q)
 	s.run()
 }
 
@@ -194,14 +209,46 @@ func (rl *Relay) release(sub string) {
 	}
 }
 
+// logAllowed counts one refusal of a kind for the user and says whether it may still be
+// logged this minute (refusalLogsPerMin per kind). Every refusal path that writes a row goes
+// through it, so no kind of refusal can fill the log.
+func (rl *Relay) logAllowed(us *userState, kind string) bool {
+	now := time.Now()
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	if us.refused == nil || now.Sub(us.refusedAt) > time.Minute {
+		us.refusedAt, us.refused = now, map[string]int{}
+	}
+	us.refused[kind]++
+	return us.refused[kind] <= refusalLogsPerMin
+}
+
+// FlushAll writes every user's pending usage to the database. The server calls it when it
+// stops, so the bytes of open sockets since their last 10-second flush are not lost.
+func (rl *Relay) FlushAll() {
+	rl.mu.Lock()
+	all := make(map[string]*userState, len(rl.users))
+	for sub, us := range rl.users {
+		all[sub] = us
+	}
+	rl.mu.Unlock()
+	for sub, us := range all {
+		rl.flush(sub, us)
+	}
+}
+
 // usedToday returns today's bytes for the user, counting what is not flushed yet.
-func (rl *Relay) usedToday(sub string, us *userState) int64 {
+// A failed read is returned as an error, never as zero: the quota must fail closed.
+func (rl *Relay) usedToday(sub string, us *userState) (int64, error) {
 	day := store.Day(time.Now())
 	rl.mu.Lock()
 	stale := us.used < 0 || us.day != day
 	rl.mu.Unlock()
 	if stale {
-		b, _, _ := rl.DB.UsageToday(sub, "relay")
+		b, _, err := rl.DB.UsageToday(sub, "relay")
+		if err != nil {
+			return 0, err
+		}
 		rl.mu.Lock()
 		if us.used < 0 || us.day != day {
 			us.used, us.day = b, day
@@ -210,13 +257,16 @@ func (rl *Relay) usedToday(sub string, us *userState) int64 {
 	}
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	return us.used
+	return us.used, nil
 }
 
 // account adds bytes and reports whether the user is still within the daily quota.
 func (rl *Relay) account(us *userState, n int64, limit int64) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+	if day := store.Day(time.Now()); us.day != day { // a transfer running across 00:00 UTC
+		us.used, us.day = 0, day
+	}
 	us.used += n
 	us.pending += n
 	return limit <= 0 || us.used <= limit
@@ -238,7 +288,7 @@ type session struct {
 	rl       *Relay
 	c        *ws.Conn
 	sub, sid string
-	q        store.Quota
+	q        atomic.Pointer[store.Quota] // the member tier's limits, re-read at every re-check
 	us       *userState
 
 	mu      sync.Mutex
@@ -351,6 +401,9 @@ func (s *session) watch(ctx context.Context) {
 				s.c.Close(1008, "access ended")
 				return
 			}
+			if q, err := s.rl.DB.GetQuota("member"); err == nil {
+				s.q.Store(&q) // an administrator's change reaches open sockets here
+			}
 		}
 	}
 }
@@ -365,16 +418,14 @@ func (s *session) portAllowed(p int) bool {
 }
 
 func (s *session) refuse(id uint32, host string, reason byte, outcome string) {
+	s.refuseAs(id, host, reason, outcome, outcome)
+}
+
+// refuseAs answers a refused CONNECT and logs it, counting it under kind for the allowance
+// of logged refusals: an outcome that carries a number (the port) still shares one allowance.
+func (s *session) refuseAs(id uint32, host string, reason byte, outcome, kind string) {
 	_ = s.send(pClose, id, []byte{reason})
-	now := time.Now()
-	s.rl.mu.Lock()
-	if now.Sub(s.us.refusedAt) > time.Minute {
-		s.us.refusedAt, s.us.refused = now, 0
-	}
-	s.us.refused++
-	write := s.us.refused <= refusalLogsPerMin
-	s.rl.mu.Unlock()
-	if write {
+	if s.rl.logAllowed(s.us, kind) {
 		_ = s.rl.DB.LogConn(s.sub, "relay", host, 0, outcome)
 	}
 }
@@ -402,7 +453,7 @@ func (s *session) connect(ctx context.Context, id uint32, body []byte) {
 		return
 	}
 	if !s.portAllowed(port) {
-		s.refuse(id, host, reasonBlocked, fmt.Sprintf("port %d refused", port))
+		s.refuseAs(id, host, reasonBlocked, fmt.Sprintf("port %d refused", port), "port refused")
 		return
 	}
 	if s.rl.DB.CapReached("relay") {
@@ -411,6 +462,11 @@ func (s *session) connect(ctx context.Context, id uint32, body []byte) {
 	}
 	dest := fmt.Sprintf("%s:%d", host, port)
 	rl := s.rl
+	q := s.q.Load()
+	if _, err := rl.usedToday(s.sub, s.us); err != nil { // a socket open across 00:00 UTC starts the new day here
+		s.refuse(id, host, reasonThrottled, "quota unavailable")
+		return
+	}
 	rl.mu.Lock()
 	now := time.Now()
 	for d, t := range s.us.dests {
@@ -420,15 +476,15 @@ func (s *session) connect(ctx context.Context, id uint32, body []byte) {
 	}
 	_, recent := s.us.dests[dest]
 	switch {
-	case s.q.Conns > 0 && s.us.streams >= s.q.Conns:
+	case q.Conns > 0 && s.us.streams >= q.Conns:
 		rl.mu.Unlock()
 		s.refuse(id, host, reasonThrottled, "too many connections")
 		return
-	case !recent && s.q.DestsPerMin > 0 && len(s.us.dests) >= s.q.DestsPerMin:
+	case !recent && q.DestsPerMin > 0 && len(s.us.dests) >= q.DestsPerMin:
 		rl.mu.Unlock()
 		s.refuse(id, host, reasonThrottled, "too many destinations")
 		return
-	case s.q.BytesPerDay > 0 && s.us.used >= s.q.BytesPerDay:
+	case q.BytesPerDay > 0 && s.us.used >= q.BytesPerDay:
 		rl.mu.Unlock()
 		s.refuse(id, host, reasonThrottled, "daily quota")
 		return
@@ -488,7 +544,7 @@ func (s *session) dial(ctx context.Context, st *stream, dest string) {
 		n, err := conn.Read(buf)
 		if n > 0 {
 			st.bytes.Add(int64(n))
-			ok := s.rl.account(s.us, int64(n), s.q.BytesPerDay)
+			ok := s.rl.account(s.us, int64(n), s.q.Load().BytesPerDay)
 			if s.send(pData, st.id, buf[:n]) != nil {
 				s.closeStream(st, reasonNetwork, "socket gone", false)
 				return
@@ -517,7 +573,7 @@ func (s *session) upstreamWriter(ctx context.Context, st *stream, conn net.Conn)
 			// counted before the write: the far end may answer at once, and a close that
 			// follows the answer must log these bytes too
 			st.bytes.Add(int64(len(p)))
-			ok := s.rl.account(s.us, int64(len(p)), s.q.BytesPerDay)
+			ok := s.rl.account(s.us, int64(len(p)), s.q.Load().BytesPerDay)
 			if _, err := conn.Write(p); err != nil {
 				s.closeStream(st, reasonNetwork, "write failed", true)
 				return
@@ -555,7 +611,11 @@ func (s *session) closeStream(st *stream, reason byte, outcome string, notify bo
 		if notify {
 			_ = s.send(pClose, st.id, []byte{reason})
 		}
-		_ = s.rl.DB.LogConn(s.sub, "relay", st.host, st.bytes.Load(), outcome)
+		// a stream that never connected (blocked address, unreachable, timeout) is a refusal:
+		// it shares the per-kind allowance, so failed dials cannot fill the log
+		if conn != nil || s.rl.logAllowed(s.us, outcome) {
+			_ = s.rl.DB.LogConn(s.sub, "relay", st.host, st.bytes.Load(), outcome)
+		}
 		_ = s.rl.DB.AddUsage(s.sub, "relay", 0, 1)
 	})
 }

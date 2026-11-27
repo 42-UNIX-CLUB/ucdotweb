@@ -105,6 +105,14 @@ func (d *DB) BundleBytes(subject string) (int64, error) {
 	return n, err
 }
 
+// AllBundleBytes is the total size of every user's bundles that still have a file on disk,
+// expired or not, for the platform's storage cap.
+func (d *DB) AllBundleBytes() (int64, error) {
+	var n int64
+	err := d.sql.QueryRow(`SELECT coalesce(sum(size), 0) FROM bundles`).Scan(&n)
+	return n, err
+}
+
 // ExpiredBundlesOf returns the ids of the subject's expired bundles.
 func (d *DB) ExpiredBundlesOf(subject string) ([]string, error) {
 	return d.bundleIDs(`SELECT id FROM bundles WHERE subject = ? AND expires <= ?`, subject, d.now().Unix())

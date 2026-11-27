@@ -100,13 +100,17 @@ type dayUse struct {
 }
 
 // usedToday returns the user's bytes today, loading them from the database once a day.
-func (p *Proxy) usedToday(subject string) int64 {
+// A failed read is returned as an error, never as zero: the quota must fail closed.
+func (p *Proxy) usedToday(subject string) (int64, error) {
 	day := store.Day(time.Now())
 	p.mu.Lock()
 	u := p.used[subject]
 	p.mu.Unlock()
 	if u == nil || u.day != day {
-		b, _, _ := p.DB.UsageToday(subject, kind)
+		b, _, err := p.DB.UsageToday(subject, kind)
+		if err != nil {
+			return 0, err
+		}
 		p.mu.Lock()
 		if p.used == nil {
 			p.used = map[string]*dayUse{}
@@ -119,7 +123,7 @@ func (p *Proxy) usedToday(subject string) int64 {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return u.bytes
+	return u.bytes, nil
 }
 
 // take records n bytes for the user and returns how many of them fit in the quota.
@@ -339,7 +343,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusServiceUnavailable, "The platform's daily proxy limit is reached. It resets at 00:00 UTC.")
 		return
 	}
-	if used := p.usedToday(subject); q.BytesPerDay > 0 && used >= q.BytesPerDay {
+	used, err := p.usedToday(subject)
+	if err != nil {
+		fail(w, http.StatusServiceUnavailable, "Quota unavailable. Try again later.")
+		return
+	}
+	if q.BytesPerDay > 0 && used >= q.BytesPerDay {
 		_ = p.DB.LogConn(subject, kind, host, 0, "daily quota")
 		fail(w, http.StatusTooManyRequests, "Daily proxy quota reached. It resets at 00:00 UTC.")
 		return
@@ -350,8 +359,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		target += "?" + r.URL.RawQuery
 	}
 	var body io.Reader
+	var capped *cappedBody
 	if r.Method == "POST" {
-		body = io.LimitReader(r.Body, 8<<20) // a clone negotiation is small
+		// a clone negotiation is small: a larger body is refused, never cut and sent on. It is
+		// streamed, not held: a known length over the limit is refused at once, and a body that
+		// passes the limit while streaming makes the upstream request fail (no short body is
+		// ever sent). The 10-minute limit below covers a body that stalls.
+		if r.ContentLength > maxPostBody {
+			_ = p.DB.LogConn(subject, kind, host, 0, "body too large")
+			fail(w, http.StatusRequestEntityTooLarge, "The request body is over 8 MiB.")
+			return
+		}
+		capped = &cappedBody{r: r.Body, left: maxPostBody}
+		body = capped
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
@@ -374,6 +394,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return nil
 	}
 	resp, err := c.Do(up)
+	if err != nil && capped != nil && capped.over.Load() {
+		_ = p.DB.LogConn(subject, kind, host, 0, "body too large")
+		fail(w, http.StatusRequestEntityTooLarge, "The request body is over 8 MiB.")
+		return
+	}
 	if err != nil {
 		outcome := "upstream error"
 		if errors.Is(err, netguard.ErrBlocked) {
@@ -395,10 +420,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Security-Policy", "sandbox")
 	w.Header().Set("Content-Disposition", "attachment")
 	w.WriteHeader(resp.StatusCode)
-	n, cut := p.copyQuota(w, resp.Body, subject, q.BytesPerDay)
+	n, end := p.copyQuota(w, resp.Body, subject, q.BytesPerDay)
 	outcome := fmt.Sprint(resp.StatusCode)
-	if cut {
+	switch {
+	case end == endQuota:
 		outcome += " cut at quota"
+	case end != endDone && end != endQuota && r.Context().Err() != nil:
+		outcome += " client gone" // the browser left: the upstream read then fails as well
+	case end == endUpstream && ctx.Err() == context.DeadlineExceeded:
+		outcome += " cut at time limit" // the 10 minutes a request may last
+	case end == endUpstream:
+		outcome += " upstream error"
+	case end == endClient:
+		outcome += " client gone"
 	}
 	_ = p.DB.AddUsage(subject, kind, n, 1)
 	_ = p.DB.LogConn(subject, kind, host, n, outcome)
@@ -406,7 +440,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // copyQuota copies the body, taking each chunk from the user's daily quota, and says if it
 // stopped because the quota ran out.
-func (p *Proxy) copyQuota(w http.ResponseWriter, r io.Reader, subject string, limit int64) (int64, bool) {
+func (p *Proxy) copyQuota(w http.ResponseWriter, r io.Reader, subject string, limit int64) (int64, copyEnd) {
 	buf := make([]byte, 64<<10)
 	var n int64
 	fl, _ := w.(http.Flusher)
@@ -416,7 +450,7 @@ func (p *Proxy) copyQuota(w http.ResponseWriter, r io.Reader, subject string, li
 			ok := p.take(subject, int64(k), limit)
 			if ok > 0 {
 				if _, werr := w.Write(buf[:ok]); werr != nil {
-					return n, false
+					return n, endClient
 				}
 				n += ok
 				if fl != nil {
@@ -424,11 +458,53 @@ func (p *Proxy) copyQuota(w http.ResponseWriter, r io.Reader, subject string, li
 				}
 			}
 			if ok < int64(k) {
-				return n, true
+				return n, endQuota
 			}
 		}
+		if err == io.EOF {
+			return n, endDone
+		}
 		if err != nil {
-			return n, false
+			return n, endUpstream
 		}
 	}
 }
+
+// copyEnd says why copyQuota stopped, for the log.
+type copyEnd int
+
+const (
+	endDone     copyEnd = iota // the whole body
+	endQuota                   // the user's daily quota ran out
+	endUpstream                // the upstream read failed, or the request's time ran out
+	endClient                  // the browser went away
+)
+
+// cappedBody passes a request body through and fails once more than left bytes have come,
+// so the upstream request is aborted instead of being sent a shortened body.
+type cappedBody struct {
+	r    io.Reader
+	left int64
+	over atomic.Bool // set in the transport's goroutine, read by the handler after Do
+}
+
+func (c *cappedBody) Read(p []byte) (int, error) {
+	if c.left < 0 {
+		return 0, errBodyTooLarge
+	}
+	if int64(len(p)) > c.left+1 {
+		p = p[:c.left+1]
+	}
+	n, err := c.r.Read(p)
+	c.left -= int64(n)
+	if c.left < 0 {
+		c.over.Store(true)
+		return 0, errBodyTooLarge
+	}
+	return n, err
+}
+
+var errBodyTooLarge = errors.New("proxy: request body over the limit")
+
+// maxPostBody is the largest POST body passed on (git's clone negotiation is far smaller).
+const maxPostBody = 8 << 20

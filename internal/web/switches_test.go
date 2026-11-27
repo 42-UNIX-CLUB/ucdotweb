@@ -62,7 +62,7 @@ func TestSigninOffSparesAdministrators(t *testing.T) {
 	if _, code := signIn(t, r); code != http.StatusOK {
 		t.Fatalf("administrator with signin_off: status %d, want 200", code)
 	}
-	m := newRig(t, map[string]any{"login": "maintainer", "status": "active"}) // in AdminLogins, never seen
+	m := newRig(t, map[string]any{"login": "maintainer", "status": "active", "ft_linked": true}) // in AdminLogins, never seen
 	_ = m.db.SetFlag("test", "signin_off", true)
 	_ = m.db.SetFlag("test", "signup_off", true)
 	if _, code := signIn(t, m); code != http.StatusOK {
@@ -148,5 +148,19 @@ func TestAdminCaps(t *testing.T) {
 	}
 	if getJSON(t, c, r, "/api/admin/caps", &out); out.Caps["relay"] != 5e10 || out.Caps["proxy"] != 0 {
 		t.Fatalf("caps %v", out.Caps)
+	}
+}
+
+func TestCheckOrigin(t *testing.T) {
+	for _, s := range []string{"https://dux.ensui.dev", "http://127.0.0.1:8090", "https://example.org:8443"} {
+		if err := CheckOrigin(s); err != nil {
+			t.Errorf("%q refused: %v", s, err)
+		}
+	}
+	for _, s := range []string{"https://dux.ensui.dev/", "https://dux.ensui.dev/app", "dux.ensui.dev", "ftp://x.org",
+		"https://", "https://x.org?", "https://x.org#", "https://user@x.org", "https://Dux.Ensui.dev", "https://x.org:443", "http://x.org:80", ""} {
+		if err := CheckOrigin(s); err == nil {
+			t.Errorf("%q accepted", s)
+		}
 	}
 }

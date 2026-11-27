@@ -18,12 +18,9 @@ import (
 // CookieName uses the __Host- prefix: Secure, Path=/, no Domain, so no subdomain can set it.
 const CookieName = "__Host-ucdotweb"
 
-// Data is what a session holds.
+// Data is what a session holds. A session exists only after a sign-in: the pending sign-in
+// before it lives in a sealed cookie (internal/web/pending.go), not here.
 type Data struct {
-	// Before sign-in: the values of the pending authorization request.
-	PendingState, PendingNonce, PendingVerifier string
-	PendingCreated                              time.Time
-	// After sign-in.
 	Subject      string
 	Claims       map[string]any
 	RefreshToken string // provider refresh token; encrypted at rest by the database backend

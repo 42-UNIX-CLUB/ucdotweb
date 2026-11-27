@@ -24,7 +24,8 @@ type Conn struct {
 	c        net.Conn
 	r        *bufio.Reader
 	wmu      sync.Mutex
-	MaxFrame int // largest message accepted from the client
+	broken   bool // a write failed part way: the stream is out of step, nothing more is sent
+	MaxFrame int  // largest message accepted from the client
 }
 
 // Upgrade completes the handshake. protocol is the subprotocol to echo ("" for none).
@@ -198,13 +199,24 @@ func (c *Conn) writeFrame(op byte, p []byte) error {
 	}
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
-	c.c.SetWriteDeadline(time.Now().Add(30 * time.Second))
-	if _, err := c.c.Write(h[:hl]); err != nil {
-		return err
+	if c.broken {
+		return errBroken
 	}
-	_, err := c.c.Write(p)
+	c.c.SetWriteDeadline(time.Now().Add(30 * time.Second))
+	_, err := c.c.Write(h[:hl])
+	if err == nil {
+		_, err = c.c.Write(p)
+	}
+	if err != nil {
+		// part of a frame may be on the wire: any later frame would be read as its rest, so
+		// the connection is closed and every later write fails
+		c.broken = true
+		c.c.Close()
+	}
 	return err
 }
+
+var errBroken = errors.New("ws: connection closed after a failed write")
 
 func (c *Conn) fail(code uint16, reason string) error {
 	c.Close(code, reason)

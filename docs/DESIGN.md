@@ -1,6 +1,6 @@
 # The UC.OS web platform: options for the owners
 
-Stream `web`, session uc-os-web. First draft, 2026-11-26. Nothing here is decided except
+The platform's design. First draft, 2026-11-26. Nothing here is decided except
 what section 0 quotes. Every other point lists options with facts and costs and no
 recommendation. Marks, as in the network study:
 
@@ -8,12 +8,12 @@ recommendation. Marks, as in the network study:
 - **[tested]** run on this machine. (Nothing in this draft is tested yet.)
 - **[estimate]** reasoning of this document. Not measured.
 
-This draft lives in `.track/web/` (git-ignored) because where the platform's code lives is
-itself point 1 below. It moves into the right tree once that is chosen.
+The first draft was written before the repository existed, because where the platform's
+code lives was itself point 1 below. It now lives in this repository.
 
 ## 0. What the owner decided (2026-11-26)
 
-The owner's full words are in `.track/WEB-SESSION.md`. In short:
+The owner's words, in short:
 
 | Kind of user | What they reach |
 |---|---|
@@ -190,7 +190,7 @@ temporary invitation-token scheme run by UC.OS administrators, removed later.
 | c. A private repository | hides the server code; security that depends on hidden code is weak, and a student club loses the review that a public repository invites; deployment secrets are equally safe in a public repository if they are never committed |
 
 Either way, the OS keeps only the client side: the host-layer code that talks to the relay
-and proxy (that is uc-os-dev's and the colleague's area).
+and proxy (that is the OS side's area, with the colleague).
 
 ## 2. The stack, and whether "everything custom" applies here
 
@@ -233,7 +233,7 @@ database per packet in either case (point 7).
 ## 3. Hosting
 
 The network study found that Cloudflare's, Deno Deploy's and Vercel's terms forbid general
-proxies ([read], quoted in `.worktrees/net/docs/NETWORK-ACCESS.md` section 6), so the relay
+proxies ([read], quoted in the OS repository's network study, `docs/NETWORK-ACCESS.md` section 6), so the relay
 needs a machine the club controls. The proxy restricted to an allow-list is closer to a
 "reverse proxy", which Deno's terms allow; Cloudflare's wording ("other similar proxy
 services") is broader. Options:
@@ -334,7 +334,7 @@ administrator); an audit log of every administrative action, kept how long.
   hammered).
 - What the user sees when a limit is reached: an error that reaches the program inside the OS
   (an HTTP 429 from the proxy; a refused stream with a reason code from the relay) and a line
-  in the OS's terminal or notification area (uc-os-dev's side).
+  in the OS's terminal or notification area (the OS side).
 - Speed: the relay keeps counters in memory and checks them per stream open and per chunk,
   and writes totals to the database periodically; quotas are loaded at connect time and
   refreshed on a short timer or when an administrator changes them [estimate].
@@ -359,7 +359,7 @@ administrator); an audit log of every administrative action, kept how long.
 
 - Wire protocol: the prototype uses Wisp v1 framing over one WebSocket. The colleague's
   stack (pull request #17) may want a different interface (a packet tunnel, or sockets). To
-  be settled with the owner and the colleague; this session will not decide it alone.
+  be settled with the owner and the colleague; it is not decided here.
 - Destination policy (relay): ports (80 and 443 only for members, or wider), block private,
   loopback, link-local, CGNAT and cloud metadata addresses after resolution, connect to the
   address that was checked (against DNS rebinding) [read: network study 7.2; the prototype
@@ -373,7 +373,7 @@ administrator); an audit log of every administrative action, kept how long.
   excluded.
 - Logging: what is logged (account, destination host, bytes, time), for how long, who can
   see it. The proxy sees full URLs and content; the relay sees only host, port and volume when
-  the OS does TLS itself (today it does not: an open point for uc-os-dev and the owner).
+  the OS does TLS itself (today it does not: an open point for the OS side and the owner).
 
 ## 10. Safety automation and panic switches
 
@@ -405,8 +405,8 @@ administrator); an audit log of every administrative action, kept how long.
 ## 12. Root in the OS and the platform
 
 The owner said a root user exists "perhaps for authenticated admin users or even authenticated
-42 or specifically authorized users by admins". uc-os-dev is building a switch: the page tells
-the kernel at boot whether this session is entitled to root.
+42 or specifically authorized users by admins". The OS side is building a switch: the page tells
+the kernel at boot whether this user is entitled to root.
 - What the platform would assert: "this session belongs to a user with role X", in a signed
   token the page fetches (point 8).
 - Can a static page trust it? Partly. The page runs on the user's own machine: anyone can edit
@@ -426,7 +426,7 @@ the kernel at boot whether this session is entitled to root.
 5. The relay for members, with quotas and destination policy.
 6. Safety automation and notifications.
 7. The admin interface.
-8. Wiring into the OS's host layer, with uc-os-dev and the colleague.
+8. Wiring into the OS's host layer, with the OS side and the colleague.
 
 No deployment, no outside account, no 42 application registration, no purchase, until the
 owner asks for that specific step.
@@ -517,7 +517,7 @@ verify before any work]:
   which the owner wanted to avoid for the default path; as an optional extra it fits beside
   bring-your-own relay.
 
-Listed as an idea in `.track/DEFERRED.md`, not a decision.
+Listed as an idea for later, not a decision.
 
 ### 15.3 Decisions of 2026-11-26 13:12
 
@@ -574,7 +574,7 @@ administrators signed in. (It is not deployed: the identity provider does not ex
 Decided by the owner (2026-11-26, after 19:58): **option a, with the admin program as the only
 allowed one.** Programs' requests through the router carry no credentials. Only the admin
 program reaches the platform with the session, through its own channel. What this asks of
-the OS side (kernel and `boot/`, uc-os-dev's): the router's fetch omits credentials; a channel
+the OS side (kernel and `boot/`): the router's fetch omits credentials; a channel
 that carries the session, which the kernel lets only the admin program use; and a way to know
 it is the admin program as installed in the image, which a program cannot fake by writing a
 file of the same name. The proxy and relay for other programs still go through the host
@@ -652,8 +652,8 @@ an independent second build (branch `web/platform-cloud`, for comparison only), 
   proxy surge cannot suspend the relay). The traffic check rests until midnight UTC on the
   day an administrator lifts a suspension.
 - **Notifications:** a chat webhook only at first, to a private admin channel on the club's
-  chat. E-mail can come later. On 2026-11-27 the owner left the choice to the web session
-  ("what you believe fit best is fine"): a Discord webhook, its URL in
+  chat. E-mail can come later. On 2026-11-27 the owner left the choice to the platform's
+  developers ("what you believe fit best is fine"): a Discord webhook, its URL in
   `/etc/ucdotweb/webhook.url` on the server, written there by an administrator
   (DEPLOY.md 2.6.1). Not configured yet: the webhook has to be made in Discord.
 - **Abuse reports:** a published e-mail address that forwards to the administrators, before
@@ -713,20 +713,23 @@ Mechanical choices, reversible:
 - Not built: an administrator view of bundles or a way to delete another user's. The server
   cannot read them, so there is nothing to moderate; ask if one is wanted.
 
-Left for the OS (uc-os-dev): the bundle format, the encryption, and the QR code. 15.1 also
+Left for the OS side: the bundle format, the encryption, and the QR code. 15.1 also
 plans an offline encrypted file export (option c) first, built entirely in the OS.
 
 ### 15.11 Fixes from the first code review (2026-11-27)
 
-A review session read the whole code base and confirmed each of these with a test (the tests
+A code review read the whole code base and confirmed each of these with a test (the tests
 are in the `opt_test.go` files). Fixed, inside the decided design:
 
 - Relay: the new-destinations-a-minute limit no longer resets when the socket is closed and
   reopened. A user's state is kept until their last destination is a minute old.
-- Relay: a stream may have at most 1 MiB of client data waiting for the far end (credit
-  counts packets, and one packet may be 1 MiB). An honest client never comes near it.
+- Relay: a stream may have at most 8 MiB of client data waiting for the far end (credit
+  counts packets, and one packet may be 1 MiB). That is a full credit of 64 KiB packets, the
+  size the OS's client sends, so an honest client never reaches it. A first cap of 1 MiB reset
+  such clients and was raised.
 - Relay: a CLOSE that arrives while the connection is being made no longer leaves that
-  connection open. Refused CONNECTs are logged at most 10 a minute per user.
+  connection open. Refused CONNECTs are logged at most 10 a minute per user and kind of
+  refusal (all refused ports are one kind), so a flood of one kind cannot hide a limit trip.
 - Address guard: an IPv6 literal with a zone (`%lo`) is refused; it escaped the prefix list.
 - Panic switches: a switch that cannot be read counts as on (fails closed).
 - Proxy: the rate limit is checked before anything is logged, so refused requests are limited
@@ -741,3 +744,155 @@ Open, put to the owners on 2026-11-27 with options: anonymous
 `/auth/login` stores a row each time; the admin bootstrap reads the `login` claim without the
 42 link; limit trips of either service suspend the relay; bundle traffic is outside the
 quotas and caps, and `bundle_bytes = 0` has no ceiling.
+
+### 15.12 Sign-in hardening (2026-11-27)
+
+The owner decided three of the points left open in 15.11. Built:
+
+- **Sealed cookie (finding 7).** `GET /auth/login` writes no database row. The pending
+  sign-in (state, nonce, PKCE verifier, start time) lives in a cookie sealed with AES-GCM.
+  The sealed content carries its own expiry, 10 minutes after the start. The callback opens
+  it, checks it and clears it. A missing, tampered or expired cookie gets the existing 400
+  ("No sign-in in progress"). A session row is written only when the callback succeeds.
+- **Current session kept (finding 15).** `GET /auth/login` no longer drops the visitor's
+  session. It stays until a callback succeeds; then the new session replaces it, with a new
+  id as before. A refused or failed callback leaves it as it was.
+- **Maintainer bootstrap needs a 42 link (finding 8).** A login in `UCDOTWEB_ADMIN_LOGINS`
+  counts only when the claim `ft_linked` is true. The same rule applies to the maintainers'
+  exemption from `signin_off` and `signup_off`, the only other place maintainers are
+  treated specially (`isMaintainer` in `internal/web/web.go`). An administrator with an
+  admin grant stays exempt from `signin_off` whatever the claim says, as before.
+
+Mechanical choices, each reversible:
+- The cookie's key is HMAC-SHA256 of the label "ucdotweb pending sign-in v1" under the
+  database key (`store.DeriveKey`). No new secret file. The label is also the AES-GCM
+  additional data. To use a separate key instead, add a key file and pass it to the server.
+- The cookie is `HttpOnly`, `SameSite=Lax`, `Max-Age=600`, and `Secure` unless
+  `UCDOTWEB_INSECURE_COOKIES=1`. Its name is `__Host-ucdotweb-signin` (or
+  `ucdotweb-signin` without Secure) with path `/`, like the session cookie, so no other site
+  under the same domain can plant one. A first version used `__Secure-` with path
+  `/auth/callback`, which a sibling name could set; the review caught it. The cost: during a
+  sign-in the cookie (a few hundred bytes) goes with every request to the origin. Change `pendingPath` and `pendingCookie` in
+  `internal/web/pending.go`.
+- Reuse: the callback clears the cookie, and the state of each sign-in that completes is
+  remembered in memory until its expiry. A second callback with the same cookie, even with
+  a new valid code, gets 403. Only completed sign-ins are remembered, so the list grows with
+  real sign-ins only. A restart forgets it. Remove `usedStates` to drop this.
+- A refused sign-in leaves the current session alone, with one exception: when the provider
+  says this very account is not active, or the account is banned here, that account's
+  session is ended too (`dropSessionOf`). `ft_active` plays no part in the maintainer rule.
+- The 15.11 test `TestOptLoginStoresARowPerAnonymousRequest` passes unchanged (0 rows for
+  300 requests). The two tests that sign in as a maintainer now send `ft_linked: true`.
+
+### 15.13 Safety and bundle limits (2026-11-27)
+
+The owner answered two of the points left open in 15.11.
+
+**Finding 9, "relay trips only".** The limit check (three or more users hitting limits within
+10 minutes) counted limit outcomes from every kind of connection log line, so three users at
+the proxy's rate limit suspended the relay. Decided: it counts only trips of the service the
+switch stops, as the traffic check already did. Built (`switchKinds` in
+`internal/safety/safety.go`; `LimitSubjects` and `TrafficByDay` in `internal/store/safety.go`
+take a list of kinds):
+
+| Switch | Limit trips counted | Traffic counted |
+|---|---|---|
+| `relay_off` (default) | relay | relay |
+| `proxy_off` | proxy | proxy |
+| `all_off` | relay and proxy | relay and proxy |
+
+Mechanical choice: `all_off` counts the relay and the proxy, not "every kind". Before, it
+counted every usage kind; now that bundle traffic is in the usage table too (below), "every
+kind" would let a bundle surge stop the relay and the proxy, and no switch stops bundles.
+Bundles write no connection log lines, so for the limit check the two readings are the same.
+To reverse: make `switchKinds` return nil for `all_off` (nil means every kind).
+
+**Findings B4 and B5, bundle limits.** The owner picked all three options:
+
+1. **Count in the daily quota.** Bundle bytes uploaded and downloaded count against the
+   user's daily byte quota and a platform daily cap, like proxy traffic.
+2. **Per-upload ceiling.** One upload is 200 MB at most, even when `bundle_bytes` is 0.
+3. **Platform storage cap.** A total for all users' stored bundles together, set by
+   administrators, 0 (no cap) by default.
+
+Built (`internal/web/bundles.go`, `internal/store/caps.go`, `internal/store/bundles.go`,
+`internal/web/admin.go`):
+
+| Limit | Where it is set | Refusal |
+|---|---|---|
+| user's daily bundle bytes | the tier's `bytes_per_day` (quotas API), counted over bundle traffic only | 429 |
+| platform daily bundle bytes | caps row `bundle` (`POST /api/admin/caps`) | 503 |
+| one upload | fixed, `BundleMaxUpload` = 200 MB | 413 |
+| user's stored bundles | the tier's `bundle_bytes` (as before) | 413 |
+| platform stored bundles | `POST /api/admin/storage` `{"name": "bundles", "bytes": N}`; `GET` shows the cap and the bytes kept now | 507 |
+
+Each answer has its own message, so the OS can say which limit it was. `GET /api/bundles`
+now also gives `max_upload`.
+
+Mechanical choices, each reversible:
+- Bundle traffic is in the usage table with the kind `bundle`, one request per upload or
+  download. The tier is "member" for a member, else "user" (`tierOf`), as for the space
+  limit. So a user has separate daily allowances for the proxy and for bundles, each of the
+  tier's `bytes_per_day`, not one shared allowance. To share one, count the proxy and bundle
+  kinds together in `UsageLeft` and `TakeUsage`.
+- An upload is checked before any byte is read: refused when a limit is already reached or a
+  `Content-Length` would pass it. The body is then read through `MaxBytesReader` with the
+  tightest limit left, so an upload without a length stops at that limit with that limit's
+  answer. The bytes an upload moved count even when it is refused part way (they crossed the
+  network); a failure on our own disk does not count.
+- A download takes its whole size from the quota and the cap when it starts, even if the
+  client stops early or asks for a range. A HEAD request takes nothing. The check and the
+  addition are one transaction (`TakeUsage`), so two downloads at once cannot both pass.
+- The platform caps for bundles are read fresh on each request, not through the 10-second
+  cache the proxy and relay use (`CapReached`), so a bundle's whole size can be checked
+  against what is left. A database error answers 500, as the bundle routes did for the
+  quota before; `CapReached` fails open instead.
+- The storage cap answers 507 Insufficient Storage, not 503: 503 already means a daily cap,
+  which clears at midnight UTC, while this one clears only when bundles are deleted or
+  expire. It counts expired bundles until their files are gone, as the per-user space does.
+- The storage cap lives in its own table (`storage_caps`, one row `bundles`) and route,
+  because it bounds bytes kept, not bytes a day; putting it in `caps` would give the column
+  `bytes_per_day` a second meaning.
+- Not exact across users: one upload at a time per user still holds, so the user's own limits
+  cannot be raced, but two users uploading at once both see the same room. The platform daily
+  cap and the storage cap can each be passed by at most one upload per user uploading at that
+  moment (each at most 200 MB). Making it exact would need a reservation held across the
+  upload; ask if it matters.
+- Not done: bundle refusals write no connection log line (bundles never did), so they do not
+  feed the safety watcher and are not in `GET /api/admin/conns`. The per-user view
+  (`GET /api/admin/users/{subject}`) shows bundle usage with the kind `bundle`.
+
+The remaining open points of 15.11 (anonymous `/auth/login` rows, the admin bootstrap reading
+`login` without the 42 link) are not touched here.
+
+
+### 15.14 Small fixes (2026-11-27)
+
+- `users.member_until` is no longer read. Nothing has written it since the member role began
+  to follow `ft_active` (15.9). The column stays in the table, unused, so no migration is
+  needed; the admin API no longer shows it.
+- `UCDOTWEB_ORIGIN` is checked at start: scheme and host only, lower case, no trailing slash,
+  no default port (browsers leave it out of the Origin header).
+  Before, a trailing slash made every Origin check fail with no message.
+- A guard test sends 2,000,000 awkward request paths through the proxy's checks and confirms
+  none leaves its allowed prefix after one decoding (`internal/proxy/optpath_test.go`). A
+  server that decodes twice could be led out with `%25`; the listed mirrors are not known to
+  do that. Refusing `%25` would close it and also refuse file names with a literal percent
+  sign: open, for the owners.
+- Proxy: a POST body over 8 MiB is refused with 413 instead of being cut and sent on. It is
+  streamed, never held: a stated length over the limit is refused at once, and a body that
+  passes the limit while streaming aborts the upstream request. (A first version read the
+  body whole before sending it on, so stalled bodies stayed in memory; the review caught
+  it.) The log says why a download ended early: "cut at quota", "cut at time limit" (the 10
+  minutes a request may last), "upstream error" or "client gone".
+- Shutdown: on SIGTERM or Ctrl-C the server stops taking requests, gives running proxy
+  requests up to 20 seconds to finish and write their usage, then writes the relay's pending
+  usage. systemd's default stop timeout (90 s) leaves room for it. A proxy download still
+  running after 20 seconds is cut, and its bytes since the start are not counted. Relay
+  streams still open at that moment get their bytes counted but no connection log row.
+- Every refusal that writes a log row now shares the per-user, per-kind allowance (10 rows a
+  minute each): refused CONNECTs, streams whose dial failed (blocked address, unreachable,
+  timeout), and relay upgrades refused at the daily quota. Streams that did connect are
+  always logged.
+- The daily byte counters fail closed: if today's usage cannot be read, the proxy and the
+  relay answer 503 "Quota unavailable" instead of counting the day from zero.
