@@ -536,3 +536,146 @@ The owner: "go with all your recommends". Recorded as decided:
   convention, as in the OS repository. No licence file while private; choose one before the
   code is ever published.
 - Token signing: Ed25519, 5-minute relay tokens, revocation list pushed to the relay.
+
+### 15.5 Outside modules (2026-11-26)
+
+The design allows the Go standard library plus a short, named list of modules. The list:
+
+| Module | Version | Why | Notes |
+|---|---|---|---|
+| github.com/mattn/go-sqlite3 | v1.14.53 | the database (SQLite in one file, decided as "SQLite or PostgreSQL" was left to the recommendations, which the owner accepted) | uses cgo: building needs a C compiler; it bundles SQLite's C source. A pure-Go alternative (modernc.org/sqlite) avoids cgo but is a much larger dependency |
+
+### 15.6 Admin pages (2026-11-26 19:56)
+
+Decided by the owner: the admin pages are a **UC.OS program** (C, a libui window inside the
+OS) that calls the admin API (`/api/admin/`, see `internal/web/admin.go`).
+
+Open, for the owners: how that program reaches the API without opening it to every program.
+The threat model treats code inside UC.OS as untrusted (it may be a Debian package). Today the
+router's host half (`boot/hostnet.mjs` in the OS repository) carries a program's HTTP
+request through the page's `fetch()`. A request to the page's own origin carries the
+session cookie, because `fetch()` sends credentials to the same origin by default. On a POST
+the browser adds the page's own Origin header. Read from the code and the Fetch standard;
+not yet tested in a browser. So once the platform shares the OS's origin, any program run by a
+signed-in administrator could call the admin API with that administrator's rights, and any
+program run by a member could mint a relay token. The program never sees the cookie, but it
+does not need to. Options:
+
+| Option | What changes | Cost and limits |
+|---|---|---|
+| a. Programs' requests carry no credentials | `hostnet.mjs` passes `credentials: 'omit'`; the platform is reached only through a separate host channel that only allowed programs can use (for example a device that only the admin program, as installed in the image, may open) | closes the hole for every program; needs a new kernel and host channel and a rule for which programs count as allowed; the proxy and relay go through the host layer anyway (section 8) |
+| b. A confirmation outside the OS | the page shows its own dialog, drawn by `boot/` and not by any program, with the action spelled out; the platform accepts a change only with a short-lived confirmation it minted after that dialog | stops silent changes even from a hostile program; reads (user list, logs) stay open to programs unless they are also confirmed; one click more for each change |
+| c. A header programs cannot set | `hostnet.mjs` refuses one header name from programs (it already refuses Cookie and Origin); the page's own admin channel sets it and the platform requires it on `/api/admin/` and `/api/relay-token` | small change; who may use that channel remains the question of option a |
+| d. Accept the risk | nothing | an administrator must use the admin program only in a session where they run nothing else |
+
+Until one is chosen, the platform should not be served on the OS's origin with real
+administrators signed in. (It is not deployed: the identity provider does not exist yet.)
+
+Decided by the owner (2026-11-26, after 19:58): **option a, with the admin program as the only
+allowed one.** Programs' requests through the router carry no credentials. Only the admin
+program reaches the platform with the session, through its own channel. What this asks of
+the OS side (kernel and `boot/`, uc-os-dev's): the router's fetch omits credentials; a channel
+that carries the session, which the kernel lets only the admin program use; and a way to know
+it is the admin program as installed in the image, which a program cannot fake by writing a
+file of the same name. The proxy and relay for other programs still go through the host
+layer (section 8), which also holds the session; that path is for members' traffic, not for
+the admin API.
+
+### 15.7 Allow-list and safety automation as built (2026-11-26)
+
+Mechanical choices made inside decided designs; each can be reversed.
+
+Allow-list (`internal/store/allowlist.go`, `internal/proxy/rules.go`):
+- It lives in the database. It is seeded once per database from `UCDOTWEB_PROXY_RULES` or the
+  built-in list, with an audit entry by "seed". After that only administrators change it. An
+  emptied list stays empty after a restart.
+- Changes take effect on the next request, with no restart. The proxy reloads when a change
+  counter moves. A change written by another process (the sqlite3 shell) is not seen until
+  the next change made through the service.
+- If the list cannot be read, the proxy refuses (503) rather than keep an old copy.
+- Input is checked: plain lowercase DNS names only (no IP literal, port, scheme or wildcard,
+  and no private suffix such as localhost, local, internal, lan, home.arpa, test, onion).
+  Prefixes start with "/" and carry no dot segments or encoded slashes. A rules file is now
+  checked the same way, so a file accepted before can now be refused.
+
+Safety automation (`internal/safety`, `internal/store/safety.go`):
+- A pass runs every minute. A tripped check sets the switch with actor "safety", writes the
+  reason to the audit log and notifies once. A switch that is already on is left alone. The
+  watcher never lifts a switch. After an administrator lifts it, only newer evidence counts,
+  and the traffic check rests for the rest of that UTC day.
+- Limit trips are read from the connection log. These outcomes count: too many connections,
+  too many destinations, daily quota, cut at daily quota, rate limited, and "... cut at quota".
+  Refused ports, addresses outside the allow-list and blocked addresses do not count.
+- Traffic: today's bytes above 5 times the daily average of the previous 7 days and above
+  10 GB (about four members at full quota). It is not checked until 7 days of history exist.
+- Abuse reports are filed by administrators only (`POST /api/admin/reports`); a critical one
+  suspends at once.
+- Notifications: chat webhook (URL in a file, https only; Discord's or Slack's body) and
+  e-mail over SMTP with STARTTLS required. Each is off until configured. A message holds the
+  switch, the time and the reasons, with pseudonymous ids only.
+
+Open, for the owners:
+1. Which service an automatic suspension stops. The decision says "global suspension"; the
+   design text says the relay. Built default: relay only (`relay_off`), with proxy only or
+   everything (`all_off`) as settings.
+2. Whether refused ports or destinations count as tripping a limit.
+3. Whether a user who used up their quota and keeps retrying counts (each retry logs "daily
+   quota" again, but they count as one user).
+4. The traffic factor (5), floor (10 GB) and the 7-day history rule.
+5. What the traffic check does on the day an administrator lifts a traffic suspension
+   (built: it rests until midnight UTC).
+6. Which chat service and which mail sender. Both need outside accounts; none was created.
+7. Whether abuse reports ever get a public intake (needed for the published abuse contact).
+
+### 15.8 Decisions of 2026-11-26, late evening ("yes" to the recommendations)
+
+The owner was asked for recommendations on the open points of 15.7 and on what to take from
+an independent second build (branch `web/platform-cloud`, for comparison only), and answered
+"yes". Decided, and built unless marked otherwise:
+
+- **Switches** "sign-in off" (`signin_off`) and "new sign-ups off" (`signup_off`), as listed
+  in section 10. Administrators and maintainers stay exempt from both.
+- **Recent sign-in for admin changes:** within 15 minutes (`UCDOTWEB_ADMIN_FRESH`). It is
+  measured from the provider's `auth_time` when sent, else from the session's start. A stale
+  one gets 401 with `{"error": "reauth", "login": "/auth/login?reauth=1"}`. That URL asks the
+  provider for a real sign-in (`prompt=login`, `max_age=0`). Not checked: whether the
+  Clubroom honours those parameters.
+- **School year:** replaced by 15.9 (42 has no fixed start of the year).
+- **Platform caps:** a daily byte cap per service, for all users together, set by
+  administrators (`/api/admin/caps`). Off (0) until the VPS allowance is known. A cap stops
+  new requests and connections within about 10 seconds of being reached.
+- **Retention:** the audit log is kept indefinitely. Abuse report summaries are erased after
+  12 months; the rest of each report stays.
+- **Safety:** a suspension stops the relay only. Refused ports and destinations do not
+  count. A retrying user counts once. Traffic: 5 times the 7-day average and at least 10 GB,
+  tuned after about a month of data, and counted only for the service the switch stops (a
+  proxy surge cannot suspend the relay). The traffic check rests until midnight UTC on the
+  day an administrator lifts a suspension.
+- **Notifications:** a chat webhook only at first, to a private admin channel on the club's
+  chat. E-mail can come later. On 2026-11-27 the owner left the choice to the web session
+  ("what you believe fit best is fine"): a Discord webhook, its URL in
+  `/etc/ucdotweb/webhook.url` on the server, written there by an administrator
+  (DEPLOY.md 2.6.1). Not configured yet: the webhook has to be made in Discord.
+- **Abuse reports:** a published e-mail address that forwards to the administrators, before
+  the relay opens to members; no public web form. Administrators file reports through the
+  API. Not set up: the address needs an owner.
+- **Kept as built on the laptop:** SQLite, sessions on disk encrypted, the relay key from a
+  file, and the relay token in the WebSocket protocol header.
+- Not taken from the second build: the example allow-list file.
+
+### 15.9 Member role from a 42 link follows the 42 account (2026-11-27)
+
+The owner: "there is no year fixed start". The options were: a fixed term from the link date;
+follow the 42 account's own state; a date chosen by the club; no automatic expiry. The owner
+chose "b": **the member role from a 42 link lasts while the linked 42 account is active.**
+This replaces "expires each school year, renewable by re-linking" (section 14 and 15).
+
+- The Clubroom decides "active" from 42's data (for example a cursus not ended and not
+  blackholed) and sends it as the claim `ft_active` (true or false). This is new work in the
+  Clubroom, alongside its linkage update.
+- The platform reads the claim at sign-in, so a change at 42 shows at the next sign-in (a
+  session lasts 12 hours at most).
+- Mechanical choice, reversible: until the Clubroom sends the claim, a missing `ft_active`
+  counts as active, so nobody loses the role before the Clubroom ships it (`ftActive` in
+  `internal/web/web.go`).
+- An administrator's member grant still counts on its own, whatever the claim says.
