@@ -296,3 +296,21 @@ func TestRefusedSigninDropsThatAccountsSession(t *testing.T) {
 		t.Fatalf("%d sessions after a refused sign-in of the banned account, want 0", n)
 	}
 }
+
+// Without a "login" claim (an account with no 42 link), the Clubroom's preferred_username is
+// shown, and it never makes anyone an administrator.
+func TestPreferredUsernameForDisplayOnly(t *testing.T) {
+	r := newRig(t, map[string]any{"preferred_username": "Maintainer", "status": "active"})
+	c, code := signIn(t, r)
+	if code != http.StatusOK {
+		t.Fatalf("sign-in: %d", code)
+	}
+	resp, err := c.Get(r.app.URL + "/api/me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	me := body(t, resp)
+	if !strings.Contains(me, `"login":"Maintainer"`) || !strings.Contains(me, `"admin":false`) {
+		t.Fatalf("/api/me: %s", me)
+	}
+}

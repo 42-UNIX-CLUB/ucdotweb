@@ -63,7 +63,10 @@ recommends").
 - Volume: per-user daily bytes and connection limits; global caps below the VPS allowance
   [design].
 - Our IP blocklisted or the host account closed: the automatic global suspension and the panic
-  switches [design]; an abuse contact address published [decided].
+  switches [design]; an abuse contact address published: `abuse@ucos.ensui.dev` in
+  `/.well-known/security.txt` [built].
+- Stream churn and proxy pile-up: at most 60 new relay streams a minute per member (an admin
+  setting) and 8 running proxy requests per user [built].
 
 ### Identity and sessions
 - Forged identity: the service accepts only the Clubroom's signed tokens or introspection
@@ -79,6 +82,13 @@ recommends").
 - Token theft by code inside the OS: relay and proxy tokens live only in the page's host layer;
   programs ask the host to open connections and never receive a token [design]. Tokens last
   5 minutes and are bound to a session id that the service can revoke [design].
+- Programs inside the OS reaching the platform's own pages: every same-origin endpoint that
+  trusts the cookie and the Origin header answers whatever script the page runs. The OS host
+  layer is the only guard between a program and those endpoints: programs' requests carry no
+  login (UC.OS decision 30), and the host builds proxy addresses only from plain host names
+  and checks the result still starts with `/proxy/{host}/`. A first version let `Host: ..`
+  turn `/proxy/../api/me` into `/api/me` in the browser, before the server could see it; found
+  and fixed on 2026-11-27 before any release [built, OS side].
 - Token theft by a script injected into the page: a strict Content-Security-Policy on the page
   (no inline script, `connect-src` limited to our origin), no third-party scripts [decided];
   the session cookie is not readable by script (`HttpOnly`).

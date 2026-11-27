@@ -121,6 +121,29 @@ func (s *Store) GetByHash(h string) (*Data, bool) {
 	return &d, true
 }
 
+// KeepAlive is GetByHash for a session in use without HTTP requests (an open relay
+// socket): it also counts as activity, touching the session at most once a minute as Get
+// does. The absolute limit still ends the session (decided 2026-11-27: relay use keeps a
+// member signed in, within the 12 hours).
+func (s *Store) KeepAlive(h string) (*Data, bool) {
+	raw, created, last, ok, err := s.b.SessionGet(h)
+	if err != nil || !ok {
+		return nil, false
+	}
+	now := s.now()
+	if now.Sub(last) > s.Idle || now.Sub(created) > s.Absolute {
+		return nil, false
+	}
+	var d Data
+	if json.Unmarshal(raw, &d) != nil {
+		return nil, false
+	}
+	if now.Sub(last) > time.Minute {
+		_ = s.b.SessionTouch(h)
+	}
+	return &d, true
+}
+
 // Put stores data under a NEW id (rotation at every change of privilege), drops the old
 // id if given, and sets the cookie.
 func (s *Store) Put(w http.ResponseWriter, oldID string, d Data) string {

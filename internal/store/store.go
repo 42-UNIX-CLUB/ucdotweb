@@ -117,6 +117,10 @@ func Open(path string, key []byte) (*DB, error) {
 		return nil, fmt.Errorf("store: schema: %w", err)
 	}
 	d := &DB{sql: db, aead: aead, key: append([]byte(nil), key...), now: time.Now}
+	if err := d.ensureQuotaColumn("streams_per_min", DefaultStreamsPerMin); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := d.ensureBundles(); err != nil {
 		db.Close()
 		return nil, err
@@ -290,13 +294,16 @@ type Quota struct {
 	DestsPerMin int
 	ReqsPerMin  int
 	BundleBytes int64 // bytes the user may keep in pending device-transfer bundles
+	// StreamsPerMin is how many relay streams a user may open a minute, to any destination,
+	// failed attempts included (decided 2026-11-27, default 60).
+	StreamsPerMin int
 }
 
 // GetQuota reads a tier's limits.
 func (d *DB) GetQuota(tier string) (Quota, error) {
 	var q Quota
-	err := d.sql.QueryRow(`SELECT bytes_per_day, conns, dests_per_min, reqs_per_min, bundle_bytes FROM quotas WHERE tier = ?`, tier).
-		Scan(&q.BytesPerDay, &q.Conns, &q.DestsPerMin, &q.ReqsPerMin, &q.BundleBytes)
+	err := d.sql.QueryRow(`SELECT bytes_per_day, conns, dests_per_min, reqs_per_min, bundle_bytes, streams_per_min FROM quotas WHERE tier = ?`, tier).
+		Scan(&q.BytesPerDay, &q.Conns, &q.DestsPerMin, &q.ReqsPerMin, &q.BundleBytes, &q.StreamsPerMin)
 	return q, err
 }
 
@@ -417,7 +424,7 @@ func (d *DB) ListUsers(query string, limit, offset int) ([]UserRow, error) {
 
 // SetQuota changes a tier's limits, with an audit entry. Only existing tiers can change.
 func (d *DB) SetQuota(actor, tier string, q Quota) error {
-	if q.BytesPerDay < 0 || q.Conns < 0 || q.DestsPerMin < 0 || q.ReqsPerMin < 0 || q.BundleBytes < 0 {
+	if q.BytesPerDay < 0 || q.Conns < 0 || q.DestsPerMin < 0 || q.ReqsPerMin < 0 || q.BundleBytes < 0 || q.StreamsPerMin < 0 {
 		return errors.New("store: limits cannot be negative")
 	}
 	tx, err := d.sql.Begin()
@@ -425,8 +432,8 @@ func (d *DB) SetQuota(actor, tier string, q Quota) error {
 		return err
 	}
 	defer tx.Rollback()
-	r, err := tx.Exec(`UPDATE quotas SET bytes_per_day = ?, conns = ?, dests_per_min = ?, reqs_per_min = ?, bundle_bytes = ? WHERE tier = ?`,
-		q.BytesPerDay, q.Conns, q.DestsPerMin, q.ReqsPerMin, q.BundleBytes, tier)
+	r, err := tx.Exec(`UPDATE quotas SET bytes_per_day = ?, conns = ?, dests_per_min = ?, reqs_per_min = ?, bundle_bytes = ?, streams_per_min = ? WHERE tier = ?`,
+		q.BytesPerDay, q.Conns, q.DestsPerMin, q.ReqsPerMin, q.BundleBytes, q.StreamsPerMin, tier)
 	if err != nil {
 		return err
 	}
@@ -434,8 +441,8 @@ func (d *DB) SetQuota(actor, tier string, q Quota) error {
 		return errors.New("store: no such tier")
 	}
 	if _, err := tx.Exec(`INSERT INTO audit (at, actor, action, target, detail) VALUES (?, ?, 'set quota', ?, ?)`,
-		d.now().Unix(), actor, tier, fmt.Sprintf("bytes/day %d, connections %d, destinations/min %d, requests/min %d, bundle bytes %d",
-			q.BytesPerDay, q.Conns, q.DestsPerMin, q.ReqsPerMin, q.BundleBytes)); err != nil {
+		d.now().Unix(), actor, tier, fmt.Sprintf("bytes/day %d, connections %d, destinations/min %d, requests/min %d, bundle bytes %d, streams/min %d",
+			q.BytesPerDay, q.Conns, q.DestsPerMin, q.ReqsPerMin, q.BundleBytes, q.StreamsPerMin)); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -443,7 +450,7 @@ func (d *DB) SetQuota(actor, tier string, q Quota) error {
 
 // Quotas returns every tier's limits.
 func (d *DB) Quotas() (map[string]Quota, error) {
-	rows, err := d.sql.Query(`SELECT tier, bytes_per_day, conns, dests_per_min, reqs_per_min, bundle_bytes FROM quotas`)
+	rows, err := d.sql.Query(`SELECT tier, bytes_per_day, conns, dests_per_min, reqs_per_min, bundle_bytes, streams_per_min FROM quotas`)
 	if err != nil {
 		return nil, err
 	}
@@ -452,7 +459,7 @@ func (d *DB) Quotas() (map[string]Quota, error) {
 	for rows.Next() {
 		var t string
 		var q Quota
-		if err := rows.Scan(&t, &q.BytesPerDay, &q.Conns, &q.DestsPerMin, &q.ReqsPerMin, &q.BundleBytes); err != nil {
+		if err := rows.Scan(&t, &q.BytesPerDay, &q.Conns, &q.DestsPerMin, &q.ReqsPerMin, &q.BundleBytes, &q.StreamsPerMin); err != nil {
 			return nil, err
 		}
 		out[t] = q
@@ -583,3 +590,22 @@ func (d *DB) Exec(q string, args ...any) error { _, err := d.sql.Exec(q, args...
 
 // QueryRow scans one row into dest; for tests only.
 func (d *DB) QueryRow(q string, dest ...any) error { return d.sql.QueryRow(q).Scan(dest...) }
+
+// DefaultStreamsPerMin is the starting relay streams-a-minute limit for every tier.
+const DefaultStreamsPerMin = 60
+
+// ensureQuotaColumn adds a limit column to the quotas table of a database made before it,
+// with its default for every tier.
+func (d *DB) ensureQuotaColumn(name string, def int64) error {
+	var n int
+	if err := d.sql.QueryRow(`SELECT count(*) FROM pragma_table_info('quotas') WHERE name = ?`, name).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	if _, err := d.sql.Exec(fmt.Sprintf(`ALTER TABLE quotas ADD COLUMN %s INTEGER NOT NULL DEFAULT %d`, name, def)); err != nil {
+		return fmt.Errorf("store: add %s: %w", name, err)
+	}
+	return nil
+}

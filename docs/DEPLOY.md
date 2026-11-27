@@ -159,6 +159,21 @@ delete the webhook in Discord and make a new one. Until the file exists the log 
 `UCDOTWEB_INSECURE_COOKIES=1` is only for this private test over plain http through the
 tunnel. It must not be set in production.
 
+Abuse contact (decided: `abuse@ucos.ensui.dev`). The owner sets up the address as a
+Cloudflare e-mail forward (Email Routing on the `ensui.dev` zone, a custom address `abuse@ucos`
+forwarding to an admin's inbox). Then:
+
+```sh
+echo 'UCDOTWEB_ABUSE_CONTACT=mailto:abuse@ucos.ensui.dev' | sudo tee -a /etc/ucdotweb/env
+sudo systemctl restart ucdotweb
+curl -s http://127.0.0.1:8090/.well-known/security.txt    # Contact, Expires, Preferred-Languages
+```
+
+`UCDOTWEB_STATIC_DIR` (local tests only) makes the service also serve a folder at `/`, for
+example an OS build's `dist`, so a browser on one local port gets the page and the platform
+together. Leave it unset on a server: there the page is served in front of the service.
+It serves files only: no folder listings and nothing whose name starts with a dot.
+
 ### 2.7 systemd units (server)
 
 The stand-in (test only):
@@ -302,7 +317,7 @@ Changes from the private test:
    sudo apt install -y caddy
    sudo tee /etc/caddy/Caddyfile >/dev/null <<'EOF'
    DOMAIN {
-       @platform path /auth/* /api/* /proxy/* /relay
+       @platform path /auth/* /api/* /proxy/* /relay /.well-known/security.txt
        handle @platform {
            reverse_proxy 127.0.0.1:8090
        }

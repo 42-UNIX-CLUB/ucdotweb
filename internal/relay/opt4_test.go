@@ -11,7 +11,8 @@ import (
 // "blocked address" and writes a row, outside the refusal allowance.
 func TestOptBlockedAddressAttemptsAreBounded(t *testing.T) {
 	r := newRig(t)
-	r.rl.Guard = &netguard.Guard{} // loopback is blocked, as in production
+	r.db.Exec(`UPDATE quotas SET streams_per_min = 0 WHERE tier = 'member'`) // this test is about the log, not the stream limit
+	r.rl.Guard = &netguard.Guard{}                                           // loopback is blocked, as in production
 	c := open(t, r)
 	const rounds = 500
 	for i := uint32(1); i <= rounds; i++ {

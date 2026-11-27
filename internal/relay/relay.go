@@ -82,6 +82,7 @@ type userState struct {
 	pending int64                // bytes not yet written to the database
 	day     string
 	refs    int
+	starts  []time.Time // streams opened in the last minute, for streams_per_min
 	// refusals logged in the current minute, so a client cannot fill the log with refusals
 	refusedAt time.Time
 	refused   map[string]int // outcome -> refusals in the minute from refusedAt
@@ -96,6 +97,9 @@ func (us *userState) idle(now time.Time) bool {
 	}
 	if us.refused != nil && now.Sub(us.refusedAt) <= time.Minute {
 		return false // keeps the count of logged refusals for its minute
+	}
+	if n := len(us.starts); n > 0 && now.Sub(us.starts[n-1]) <= time.Minute {
+		return false // keeps the streams-a-minute count across a reconnect
 	}
 	for _, t := range us.dests {
 		if now.Sub(t) <= time.Minute {
@@ -221,6 +225,17 @@ func (rl *Relay) logAllowed(us *userState, kind string) bool {
 	}
 	us.refused[kind]++
 	return us.refused[kind] <= refusalLogsPerMin
+}
+
+// recentStarts drops stream starts older than a minute and returns how many are left.
+// Called under rl.mu.
+func recentStarts(us *userState, now time.Time) int {
+	i := 0
+	for i < len(us.starts) && now.Sub(us.starts[i]) > time.Minute {
+		i++
+	}
+	us.starts = us.starts[i:]
+	return len(us.starts)
 }
 
 // FlushAll writes every user's pending usage to the database. The server calls it when it
@@ -480,6 +495,10 @@ func (s *session) connect(ctx context.Context, id uint32, body []byte) {
 		rl.mu.Unlock()
 		s.refuse(id, host, reasonThrottled, "too many connections")
 		return
+	case q.StreamsPerMin > 0 && recentStarts(s.us, now) >= q.StreamsPerMin:
+		rl.mu.Unlock()
+		s.refuse(id, host, reasonThrottled, "too many streams")
+		return
 	case !recent && q.DestsPerMin > 0 && len(s.us.dests) >= q.DestsPerMin:
 		rl.mu.Unlock()
 		s.refuse(id, host, reasonThrottled, "too many destinations")
@@ -493,6 +512,7 @@ func (s *session) connect(ctx context.Context, id uint32, body []byte) {
 	if !recent {
 		s.us.dests[dest] = now
 	}
+	s.us.starts = append(s.us.starts, now) // every stream counts, the same destination and failed dials too
 	s.us.streams++
 	rl.mu.Unlock()
 

@@ -205,3 +205,34 @@ func TestFlushAllWritesPendingUsage(t *testing.T) {
 	}
 	r.rl.release("u9")
 }
+
+// streams_per_min counts every stream, the same destination included, and holds across a
+// reconnect.
+func TestStreamsPerMinute(t *testing.T) {
+	r := newRig(t)
+	r.db.Exec(`UPDATE quotas SET streams_per_min = 3 WHERE tier = 'member'`)
+	tok := r.token(t)
+	c, code := dial(t, r, origin, "wisp, ucos-token."+tok)
+	if code != 101 {
+		t.Fatalf("upgrade: %d", code)
+	}
+	c.read(t)
+	for i := uint32(1); i <= 3; i++ {
+		c.send(pConnect, i, connectBody(r.port, "127.0.0.1"))
+		if typ, id, _, _ := c.read(t); typ != pContinue || id != i {
+			t.Fatalf("stream %d: packet %d on %d", i, typ, id)
+		}
+		c.send(pClose, i, []byte{reasonVoluntary})
+	}
+	c.send(pConnect, 4, connectBody(r.port, "127.0.0.1"))
+	expectClose(t, c, 4, reasonThrottled)
+	c.c.Close()
+	r.waitNoSockets(t)
+	c2, code := dial(t, r, origin, "wisp, ucos-token."+tok)
+	if code != 101 {
+		t.Fatalf("second upgrade: %d", code)
+	}
+	c2.read(t)
+	c2.send(pConnect, 1, connectBody(r.port, "127.0.0.1"))
+	expectClose(t, c2, 1, reasonThrottled)
+}

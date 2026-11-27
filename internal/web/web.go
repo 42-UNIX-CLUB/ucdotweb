@@ -6,9 +6,11 @@ package web
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -40,6 +42,13 @@ type Server struct {
 	AdminFresh time.Duration
 	// Safety is the safety watcher; nil makes GET /api/admin/safety answer 503.
 	Safety *safety.Watcher
+	// StaticDir, when set, is served at / for every path no route takes: the OS's dist
+	// folder, so one process gives one origin for local tests. Production puts Caddy in front
+	// instead (DEPLOY.md). Empty: nothing is served at /.
+	StaticDir string
+	// AbuseContact, when set (for example mailto:abuse@ucos.ensui.dev), is published at
+	// /.well-known/security.txt.
+	AbuseContact string
 	// BundleDir holds device-transfer bundles, one file each; empty leaves /api/bundles out.
 	BundleDir string
 	bundles   bundleState
@@ -57,6 +66,12 @@ func (s *Server) Handler() http.Handler {
 	s.allowlistRoutes(mux)
 	s.safetyRoutes(mux)
 	s.bundleRoutes(mux)
+	if s.AbuseContact != "" {
+		mux.HandleFunc("GET /.well-known/security.txt", s.securityTxt(time.Now().AddDate(0, 0, 180).Truncate(time.Second)))
+	}
+	if s.StaticDir != "" {
+		mux.Handle("/", staticHeaders(http.FileServer(plainDir{http.Dir(s.StaticDir)})))
+	}
 	if s.Proxy != nil {
 		mux.Handle("/proxy/", s.Proxy)
 	}
@@ -129,7 +144,14 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "This platform is not taking new accounts for now. Try again later.", http.StatusServiceUnavailable)
 		return
 	}
-	u, err := s.DB.SeenUser(ident.Subject, login)
+	// the name shown in the admin views and /api/me: the 42 login when linked, else the
+	// Clubroom's own name (preferred_username). Display only: the bootstrap reads "login"
+	// together with ft_linked (isMaintainer), never this.
+	display := login
+	if display == "" {
+		display, _ = ident.Claims["preferred_username"].(string)
+	}
+	u, err := s.DB.SeenUser(ident.Subject, display)
 	if err != nil {
 		s.Log.Printf("sign-in: recording the user failed: %v", err)
 		http.Error(w, "Sign-in failed. Try again later.", http.StatusInternalServerError)
@@ -262,7 +284,7 @@ func ftActive(claims map[string]any) bool {
 // CheckRelay is the relay's re-check: the session still exists, belongs to the subject,
 // and the user is a member and not banned.
 func (s *Server) CheckRelay(subject, sidHash string) error {
-	d, ok := s.Sessions.GetByHash(sidHash)
+	d, ok := s.Sessions.KeepAlive(sidHash) // relay use counts as activity
 	if !ok {
 		return errors.New("signed out")
 	}
@@ -334,6 +356,32 @@ func (s *Server) isMaintainer(claims map[string]any) bool {
 	return false
 }
 
+// securityTxt publishes the abuse contact (RFC 9116), as the threat model asks before the
+// relay opens to members.
+// securityTxt answers /.well-known/security.txt (RFC 9116). Expires is fixed when the routes
+// are built, 180 days ahead: under the year the RFC allows, and it does not move with every
+// request. A server that runs past it publishes a stale date, which is what the field is for.
+func (s *Server) securityTxt(expires time.Time) http.HandlerFunc {
+	body := fmt.Sprintf("Contact: %s\nExpires: %s\nPreferred-Languages: en, pt\n",
+		s.AbuseContact, expires.UTC().Format(time.RFC3339))
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		fmt.Fprint(w, body)
+	}
+}
+
+// staticHeaders gives the OS's files, for local tests, the enforced Content-Security-Policy
+// of the OS's own Caddyfile (deploy/Caddyfile in the OS repository), and no caching on every
+// file (the Caddyfile does that only for the page and boot files) so a rebuild shows at once.
+func staticHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Content-Security-Policy", "object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+		h.Set("Cache-Control", "no-cache")
+		next.ServeHTTP(w, r)
+	})
+}
+
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -342,4 +390,29 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("X-Frame-Options", "DENY")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// plainDir serves files only: no file or folder whose name starts with a dot, and no listing
+// of a folder that has no index.html.
+type plainDir struct{ d http.Dir }
+
+func (p plainDir) Open(name string) (http.File, error) {
+	for _, part := range strings.Split(name, "/") {
+		if strings.HasPrefix(part, ".") {
+			return nil, os.ErrNotExist
+		}
+	}
+	f, err := p.d.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	if st, err := f.Stat(); err == nil && st.IsDir() {
+		idx, err := p.d.Open(strings.TrimSuffix(name, "/") + "/index.html")
+		if err != nil {
+			f.Close()
+			return nil, os.ErrNotExist
+		}
+		idx.Close()
+	}
+	return f, nil
 }

@@ -21,7 +21,7 @@ func TestOptStalledPostBodiesAreNotHeldInMemory(t *testing.T) {
 	runtime.GC()
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
-	const conns, sent = 20, 4 << 20
+	const conns, sent = maxRunning, 4 << 20 // the most a user may have running at once
 	part := []byte(strings.Repeat("x", 64<<10))
 	for i := 0; i < conns; i++ {
 		c, err := net.Dial("tcp", addr)

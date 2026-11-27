@@ -878,7 +878,7 @@ The remaining open points of 15.11 (anonymous `/auth/login` rows, the admin boot
   none leaves its allowed prefix after one decoding (`internal/proxy/optpath_test.go`). A
   server that decodes twice could be led out with `%25`; the listed mirrors are not known to
   do that. Refusing `%25` would close it and also refuse file names with a literal percent
-  sign: open, for the owners.
+  sign. The owners chose to refuse it (15.15).
 - Proxy: a POST body over 8 MiB is refused with 413 instead of being cut and sent on. It is
   streamed, never held: a stated length over the limit is refused at once, and a body that
   passes the limit while streaming aborts the upstream request. (A first version read the
@@ -896,3 +896,39 @@ The remaining open points of 15.11 (anonymous `/auth/login` rows, the admin boot
   always logged.
 - The daily byte counters fail closed: if today's usage cannot be read, the proxy and the
   relay answer 503 "Quota unavailable" instead of counting the day from zero.
+
+### 15.15 Owner decisions of 2026-11-27, evening
+
+The owners answered four open points, each with the first option offered:
+
+- **Relay streams a minute.** A fourth relay limit, `streams_per_min`, set by the
+  administrators with the others (default 60). A member who opens more streams than that in a
+  minute is refused with "too many streams", which counts toward the safety automation like
+  the other limit refusals. It holds across reconnects. 0 turns it off. The admin quota form
+  now needs all six limits; older databases get the column with the default on start.
+- **Proxy requests at once.** At most 8 running proxy requests per user. The ninth is refused
+  with 429 "Too many proxy requests at once" and a log row.
+- **Relay use keeps a member signed in.** Each relay token request and each relay re-check
+  counts as activity, so a member who only uses the network stays signed in within the 12 hour
+  limit. It touches the session at most once a minute.
+- **`%25` in proxy paths is refused** (400 "Bad host or path."), closing the double decoding
+  path noted in 15.14. Files whose names hold a literal percent sign cannot be fetched.
+
+Abuse contact: `abuse@ucos.ensui.dev`, a Cloudflare e-mail forward the owner sets up. With
+`UCDOTWEB_ABUSE_CONTACT` set, the server answers `/.well-known/security.txt` (RFC 9116) with
+the contact (it must be a mailto:, https: or tel: URI, or the server will not start), an
+expiry 180 days after the server started, and the language.
+
+Also built in this round:
+
+- Every refusal the proxy itself makes carries `X-UCOS-Proxy-Refused: WORD`, so the OS can
+  tell a refusal from an answer of the far end (which never carries it). The words:
+  `no-header`, `signed-out`, `off`, `banned`, `bad-path`, `rate`, `unavailable` (quota or list
+  could not be read), `not-listed`, `cap` (the platform's daily limit), `quota` (the user's),
+  `busy` (8 at once), `too-large`, `upstream`.
+- `UCDOTWEB_STATIC_DIR`, for local tests only: the service also serves a folder (the OS's
+  `dist`) at `/`, so one local port carries the page and the platform. In production the TLS
+  terminator serves the page (section 3 of DEPLOY.md).
+- The display name falls back to the `preferred_username` claim when the `login` claim is
+  absent (the Clubroom sends `login` only for linked 42 accounts). It is shown, never used to
+  decide anything.

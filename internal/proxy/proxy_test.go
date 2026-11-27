@@ -390,3 +390,56 @@ func TestChunkedLargePostRefused(t *testing.T) {
 		t.Fatalf("a chunked body of 9 MiB: status %d, want 413", resp.StatusCode)
 	}
 }
+
+func TestRunningCap(t *testing.T) {
+	p := &Proxy{}
+	for i := 0; i < maxRunning; i++ {
+		if !p.begin("u") {
+			t.Fatalf("request %d refused", i+1)
+		}
+	}
+	if p.begin("u") {
+		t.Fatal("request 9 accepted while 8 run")
+	}
+	if !p.begin("v") {
+		t.Fatal("another user refused")
+	}
+	p.end("u")
+	if !p.begin("u") {
+		t.Fatal("refused after one finished")
+	}
+}
+
+func TestPercent25Refused(t *testing.T) {
+	for _, s := range []string{"/debian/%252f..", "/debian/a%25b"} {
+		if !badPath(s) {
+			t.Errorf("%s allowed", s)
+		}
+	}
+}
+
+// Refusals the proxy makes name their reason; answers from the far end, even errors, do not.
+func TestRefusedHeader(t *testing.T) {
+	out := newRig(t, false)
+	in := newRig(t, true)
+	cases := []struct {
+		r    *rig
+		path string
+		hdr  bool
+		want string
+	}{
+		{in, "/proxy/deb.debian.org/debian/dists/stable/InRelease", false, "no-header"},
+		{out, "/proxy/deb.debian.org/debian/dists/stable/InRelease", true, "signed-out"},
+		{in, "/proxy/deb.debian.org/debian/a%25b", true, "bad-path"},
+		{in, "/proxy/evil.example/x", true, "not-listed"},
+		{in, "/proxy/deb.debian.org/debian/dists/stable/InRelease", true, ""},
+		{in, "/proxy/deb.debian.org/debian/missing", true, ""}, // the far end's 404
+	}
+	for _, c := range cases {
+		resp := c.r.get(t, c.path, c.hdr)
+		resp.Body.Close()
+		if got := resp.Header.Get(RefusedHeader); got != c.want {
+			t.Errorf("%s (header %v): %d, %s %q, want %q", c.path, c.hdr, resp.StatusCode, RefusedHeader, got, c.want)
+		}
+	}
+}

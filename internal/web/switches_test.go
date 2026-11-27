@@ -2,10 +2,14 @@ package web
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/42-UNIX-CLUB/ucdotweb/internal/store"
 )
 
 func signIn(t *testing.T, r *rig) (*http.Client, int) {
@@ -162,5 +166,47 @@ func TestCheckOrigin(t *testing.T) {
 		if err := CheckOrigin(s); err == nil {
 			t.Errorf("%q accepted", s)
 		}
+	}
+}
+
+func TestStaticAndSecurityTxt(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/index.html", []byte("<p>os</p>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(t.TempDir()+"/test.db", make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := &Server{DB: db, StaticDir: dir, AbuseContact: "mailto:abuse@ucos.ensui.dev"}
+	h := s.Handler()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "<p>os</p>") || rec.Header().Get("Content-Security-Policy") == "" {
+		t.Fatalf("static /: %d %q csp %q", rec.Code, rec.Body.String(), rec.Header().Get("Content-Security-Policy"))
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/.well-known/security.txt", nil))
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "Contact: mailto:abuse@ucos.ensui.dev") || !strings.Contains(rec.Body.String(), "Expires: ") {
+		t.Fatalf("security.txt: %d %q", rec.Code, rec.Body.String())
+	}
+	if err := os.Mkdir(dir+"/sub", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir+"/.secret", []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"/sub/", "/.secret"} { // no listing, no dot files
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", p, nil))
+		if rec.Code != 404 {
+			t.Errorf("static %s: %d, want 404", p, rec.Code)
+		}
+	}
+	rec = httptest.NewRecorder()
+	(&Server{DB: db}).Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	if rec.Code != 404 {
+		t.Fatalf("no static folder: / answered %d, want 404", rec.Code)
 	}
 }
