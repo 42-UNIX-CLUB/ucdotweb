@@ -209,7 +209,7 @@ func TestCookieFlags(t *testing.T) {
 }
 
 func TestMaintainerBecomesAdmin(t *testing.T) {
-	r := newRig(t, map[string]any{"login": "maintainer", "status": "active"})
+	r := newRig(t, map[string]any{"login": "maintainer", "status": "active", "ft_linked": true})
 	c := client(t)
 	resp, _ := c.Get(r.app.URL + "/auth/login")
 	resp.Body.Close()

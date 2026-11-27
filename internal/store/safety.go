@@ -130,8 +130,9 @@ func (d *DB) CriticalReportsAfter(t time.Time) ([]Report, error) {
 }
 
 // LimitSubjects returns the distinct users with a connection log line at or after since whose
-// outcome is one of exact, or ends with one of suffixes. Sorted.
-func (d *DB) LimitSubjects(since time.Time, exact, suffixes []string) ([]string, error) {
+// outcome is one of exact, or ends with one of suffixes. Sorted. Only lines of the given kinds
+// ("relay", "proxy") count; no kinds means every kind.
+func (d *DB) LimitSubjects(since time.Time, kinds, exact, suffixes []string) ([]string, error) {
 	var cond []string
 	args := []any{since.Unix()}
 	for _, e := range exact {
@@ -145,8 +146,9 @@ func (d *DB) LimitSubjects(since time.Time, exact, suffixes []string) ([]string,
 	if len(cond) == 0 {
 		return []string{}, nil
 	}
+	kindCond, kindArgs := kindsIn(kinds)
 	rows, err := d.sql.Query(`SELECT DISTINCT subject FROM conn_log WHERE at >= ? AND (`+
-		strings.Join(cond, " OR ")+`) ORDER BY subject`, args...)
+		strings.Join(cond, " OR ")+`)`+kindCond+` ORDER BY subject`, append(args, kindArgs...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -162,14 +164,29 @@ func (d *DB) LimitSubjects(since time.Time, exact, suffixes []string) ([]string,
 	return out, rows.Err()
 }
 
+// kindsIn is the SQL condition " AND kind IN (?, ...)" and its arguments; empty for no kinds.
+func kindsIn(kinds []string) (string, []any) {
+	if len(kinds) == 0 {
+		return "", nil
+	}
+	args := make([]any, len(kinds))
+	for i, k := range kinds {
+		args[i] = k
+	}
+	return " AND kind IN (?" + strings.Repeat(", ?", len(kinds)-1) + ")", args
+}
+
 func likeEscape(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }
 
 // TrafficByDay returns the bytes added up per day, for the days from from to to (inclusive),
-// for one kind of usage ("relay" or "proxy"), or for every kind when kind is empty.
-func (d *DB) TrafficByDay(kind, from, to string) (map[string]int64, error) {
-	rows, err := d.sql.Query(`SELECT day, sum(bytes) FROM usage WHERE day >= ? AND day <= ? AND (? = '' OR kind = ?) GROUP BY day`, from, to, kind, kind)
+// for the given kinds of usage ("relay", "proxy", "bundle"), or for every kind when kinds is
+// empty.
+func (d *DB) TrafficByDay(kinds []string, from, to string) (map[string]int64, error) {
+	kindCond, kindArgs := kindsIn(kinds)
+	rows, err := d.sql.Query(`SELECT day, sum(bytes) FROM usage WHERE day >= ? AND day <= ?`+kindCond+` GROUP BY day`,
+		append([]any{from, to}, kindArgs...)...)
 	if err != nil {
 		return nil, err
 	}

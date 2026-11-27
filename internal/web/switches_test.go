@@ -62,7 +62,7 @@ func TestSigninOffSparesAdministrators(t *testing.T) {
 	if _, code := signIn(t, r); code != http.StatusOK {
 		t.Fatalf("administrator with signin_off: status %d, want 200", code)
 	}
-	m := newRig(t, map[string]any{"login": "maintainer", "status": "active"}) // in AdminLogins, never seen
+	m := newRig(t, map[string]any{"login": "maintainer", "status": "active", "ft_linked": true}) // in AdminLogins, never seen
 	_ = m.db.SetFlag("test", "signin_off", true)
 	_ = m.db.SetFlag("test", "signup_off", true)
 	if _, code := signIn(t, m); code != http.StatusOK {

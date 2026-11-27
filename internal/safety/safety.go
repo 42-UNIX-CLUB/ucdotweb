@@ -338,36 +338,40 @@ func (w *Watcher) finish(now time.Time, f store.FlagRow, armed time.Time, checks
 }
 
 // checkLimits is check (a): distinct users with a limit outcome in the window, after the lift.
+// Only limits of the service the switch stops count, as for traffic: three users at the
+// proxy's rate limit do not suspend the relay (owner, 2026-11-27).
 func (w *Watcher) checkLimits(now, armed time.Time, errs *[]string) CheckResult {
 	c := CheckResult{Name: "limits"}
 	since := now.Add(-w.cfg.Window)
 	if !armed.IsZero() && !armed.Add(time.Second).Before(since) {
 		since = armed.Add(time.Second) // log times are whole seconds: the lift's second is excluded
 	}
-	subs, err := w.db.LimitSubjects(since, w.cfg.LimitOutcomes, w.cfg.LimitSuffixes)
+	subs, err := w.db.LimitSubjects(since, switchKinds(w.cfg.Switch), w.cfg.LimitOutcomes, w.cfg.LimitSuffixes)
 	if err != nil {
 		*errs = append(*errs, "limits: "+err.Error())
 		c.Detail = "could not read the connection log"
 		return c
 	}
 	c.Tripped = len(subs) >= w.cfg.MinUsers
-	c.Detail = fmt.Sprintf("%d users hit a limit in the last %s (threshold %d)", len(subs), minutes(w.cfg.Window), w.cfg.MinUsers)
+	c.Detail = fmt.Sprintf("%d users hit a %s limit in the last %s (threshold %d)", len(subs), strings.Join(switchKinds(w.cfg.Switch), " or "), minutes(w.cfg.Window), w.cfg.MinUsers)
 	if c.Tripped {
 		c.Detail += ": " + strings.Join(subs, ", ") + "."
 	}
 	return c
 }
 
-// trafficKind is the usage the traffic check measures: the service the switch stops, so a
-// surge on one service never suspends another (owner, 2026-11-26).
-func trafficKind(sw string) string {
+// switchKinds are the kinds of usage and connection log lines that both checks (a) and (b)
+// read: those of the services the switch stops, so trouble on one service never suspends
+// another (owner, 2026-11-26 for traffic, 2026-11-27 for limits). all_off stops the relay
+// and the proxy. No switch stops device-transfer bundles, so bundle traffic never counts.
+func switchKinds(sw string) []string {
 	switch sw {
 	case "relay_off":
-		return "relay"
+		return []string{"relay"}
 	case "proxy_off":
-		return "proxy"
+		return []string{"proxy"}
 	}
-	return "" // all_off: every service
+	return []string{"relay", "proxy"} // all_off
 }
 
 // checkTraffic is check (b): today's bytes of the switched service against the previous
@@ -389,7 +393,7 @@ func (w *Watcher) checkTraffic(now, armed time.Time, errs *[]string) CheckResult
 		c.Detail = fmt.Sprintf("skipped: less than %d days of history", w.cfg.HistoryDays)
 		return c
 	}
-	days, err := w.db.TrafficByDay(trafficKind(w.cfg.Switch), store.Day(now.AddDate(0, 0, -7)), today)
+	days, err := w.db.TrafficByDay(switchKinds(w.cfg.Switch), store.Day(now.AddDate(0, 0, -7)), today)
 	if err != nil {
 		*errs = append(*errs, "traffic: "+err.Error())
 		c.Detail = "could not read the usage"

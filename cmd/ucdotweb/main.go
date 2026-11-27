@@ -8,8 +8,8 @@
 //	UCDOTWEB_CLIENT_ID      our client id at the provider
 //	UCDOTWEB_SECRET_FILE    a file holding the client secret (one line)
 //	UCDOTWEB_DB             the SQLite database file
-//	UCDOTWEB_DB_KEY_FILE    a file holding 64 hex characters (32 bytes): encrypts sessions at rest
-//	UCDOTWEB_ADMIN_LOGINS   comma-separated 42 logins of the maintainers (administrators)
+//	UCDOTWEB_DB_KEY_FILE    a file holding 64 hex characters (32 bytes): encrypts sessions at rest; seals the pending sign-in cookie
+//	UCDOTWEB_ADMIN_LOGINS   comma-separated 42 logins of the maintainers (administrators); counts only with ft_linked true
 //	UCDOTWEB_PROXY_RULES    optional JSON file that seeds the proxy's allow-list on the first start only (default: built in)
 //	UCDOTWEB_RELAY_KEY_FILE a file holding 64 hex characters: the Ed25519 seed that signs relay tokens
 //	UCDOTWEB_RELAY_PORTS    optional, comma-separated destination ports (default 80,443)

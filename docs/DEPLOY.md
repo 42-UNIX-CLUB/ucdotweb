@@ -266,7 +266,22 @@ Device-transfer bundles live as files in `/var/lib/ucdotweb/bundles` (the defaul
 `UCDOTWEB_BUNDLE_DIR` to move it), created on the first start. They are ciphertext the server
 cannot read, and they expire within 30 days, so they need no backup. Their disk use is at most
 the bundle limit (50 MB by default) times the number of users; `du -sh` on that directory
-shows it.
+shows it. A tier whose bundle limit is 0 has no per-user limit, but one upload is still
+200 MB at most.
+
+To bound the total on a small disk, an administrator sets the platform storage cap for
+bundles (0 means none, the default). It counts every user's bundles together, expired ones
+too until their files are gone, and refuses uploads past it with 507:
+
+```sh
+curl -s -b $J http://127.0.0.1:8090/api/admin/storage          # the cap and the bytes kept now
+curl -s -b $J -H 'Content-Type: application/json' -H 'Origin: http://127.0.0.1:8090' \
+  -d '{"name":"bundles","bytes":5000000000}' http://127.0.0.1:8090/api/admin/storage
+```
+
+Bundle traffic (uploads and downloads) also counts against each user's daily bytes and
+against a platform daily cap, the caps row `bundle` (0 means none, the default), set like the
+proxy's and the relay's: `POST /api/admin/caps` with `{"service":"bundle","bytes_per_day":N}`.
 
 ## 3. Production (B), once the Clubroom's provider exists
 

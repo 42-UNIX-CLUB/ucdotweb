@@ -23,7 +23,9 @@ import (
 //	GET  /api/admin/flags                            panic switches
 //	POST /api/admin/flag                             {"name": "proxy_off"|"relay_off"|"all_off"|"signin_off"|"signup_off", "on": bool}
 //	GET  /api/admin/caps                             platform caps: bytes a day per service, all users together (0: none)
-//	POST /api/admin/caps                             {"service": "proxy"|"relay", "bytes_per_day": N}
+//	POST /api/admin/caps                             {"service": "proxy"|"relay"|"bundle", "bytes_per_day": N}
+//	GET  /api/admin/storage                          storage caps: bytes kept, all users together (0: none), and the bytes kept now
+//	POST /api/admin/storage                          {"name": "bundles", "bytes": N}
 //	GET  /api/admin/audit?before=ID&limit=N          audit log, newest first
 //	GET  /api/admin/conns?subject=S&before=UNIX&limit=N   connection log (host only), newest first
 //	GET  /api/admin/allowlist                        the proxy's allow-list, by host (admin_allowlist.go)
@@ -45,6 +47,8 @@ func (s *Server) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/admin/flag", s.adminChange(s.adminFlag))
 	mux.HandleFunc("GET /api/admin/caps", s.admin(s.adminCaps))
 	mux.HandleFunc("POST /api/admin/caps", s.adminChange(s.adminSetCap))
+	mux.HandleFunc("GET /api/admin/storage", s.admin(s.adminStorage))
+	mux.HandleFunc("POST /api/admin/storage", s.adminChange(s.adminSetStorage))
 	mux.HandleFunc("GET /api/admin/audit", s.admin(s.adminAudit))
 	mux.HandleFunc("GET /api/admin/conns", s.admin(s.adminConns))
 }
@@ -362,6 +366,40 @@ func (s *Server) adminSetCap(w http.ResponseWriter, r *http.Request, v Viewer) {
 	}
 	if err := s.DB.SetCap(v.Subject, in.Service, *in.BytesPerDay); err != nil {
 		http.Error(w, "Unknown service, or the change failed.", http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) adminStorage(w http.ResponseWriter, r *http.Request, _ Viewer) {
+	caps, err := s.DB.StorageCaps()
+	if err != nil {
+		http.Error(w, "Could not read the storage caps.", http.StatusInternalServerError)
+		return
+	}
+	stored, err := s.DB.AllBundleBytes()
+	if err != nil {
+		http.Error(w, "Could not read the storage caps.", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"storage": caps, "used": map[string]int64{bundleStorage: stored}})
+}
+
+func (s *Server) adminSetStorage(w http.ResponseWriter, r *http.Request, v Viewer) {
+	var in struct {
+		Name  string `json:"name"`
+		Bytes *int64 `json:"bytes"`
+	}
+	if err := decode(r, &in); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if in.Bytes == nil || *in.Bytes < 0 {
+		http.Error(w, "Give bytes, 0 or more (0 means no cap).", http.StatusBadRequest)
+		return
+	}
+	if err := s.DB.SetStorageCap(v.Subject, in.Name, *in.Bytes); err != nil {
+		http.Error(w, "Unknown storage, or the change failed.", http.StatusBadRequest)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

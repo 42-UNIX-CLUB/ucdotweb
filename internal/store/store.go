@@ -7,6 +7,7 @@ package store
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -23,6 +24,7 @@ import (
 type DB struct {
 	sql  *sql.DB
 	aead cipher.AEAD
+	key  []byte // the database key, kept only to derive keys for other purposes (DeriveKey)
 	now  func() time.Time
 	caps capState
 }
@@ -114,7 +116,7 @@ func Open(path string, key []byte) (*DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("store: schema: %w", err)
 	}
-	d := &DB{sql: db, aead: aead, now: time.Now}
+	d := &DB{sql: db, aead: aead, key: append([]byte(nil), key...), now: time.Now}
 	if err := d.ensureBundles(); err != nil {
 		db.Close()
 		return nil, err
@@ -124,6 +126,15 @@ func Open(path string, key []byte) (*DB, error) {
 
 // Close closes the database.
 func (d *DB) Close() error { return d.sql.Close() }
+
+// DeriveKey returns a 32-byte key for another purpose: HMAC-SHA256 of the label under the
+// database key. Different labels give unrelated keys, and none of them reveals the database
+// key, so no second secret file is needed.
+func (d *DB) DeriveKey(label string) []byte {
+	m := hmac.New(sha256.New, d.key)
+	m.Write([]byte(label))
+	return m.Sum(nil)
+}
 
 // HashID turns a session id into the key stored: a leaked database gives no usable cookie.
 func HashID(id string) string {

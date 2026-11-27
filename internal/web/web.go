@@ -27,7 +27,8 @@ type Server struct {
 	Log      *log.Logger
 	DB       *store.DB
 	// AdminLogins are the 42 logins of the maintainers, who are administrators from their
-	// first sign-in ("The admins are the maintainers"). Compared case-insensitively.
+	// first sign-in ("The admins are the maintainers"). Compared case-insensitively, and only
+	// for an account whose 42 account is linked (isMaintainer).
 	AdminLogins []string
 	// Proxy handles /proxy/; nil leaves the route out.
 	Proxy http.Handler
@@ -42,6 +43,7 @@ type Server struct {
 	// BundleDir holds device-transfer bundles, one file each; empty leaves /api/bundles out.
 	BundleDir string
 	bundles   bundleState
+	signins   usedStates // pending sign-ins already completed (pending.go)
 }
 
 // Handler returns the routes.
@@ -65,78 +67,99 @@ func (s *Server) Handler() http.Handler {
 	return securityHeaders(mux)
 }
 
+// login sends the browser to the provider. It writes no database row and leaves any current
+// session alone: the pending sign-in goes into a sealed cookie (pending.go), and the current
+// session is replaced only when the callback succeeds. So a link to /auth/login cannot sign
+// anyone out.
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	oldID, _ := s.Sessions.Get(r)
 	var extra url.Values
 	if r.URL.Query().Get("reauth") == "1" {
 		// ask the provider for a real new sign-in, not a silent one from its own session
 		extra = url.Values{"prompt": {"login"}, "max_age": {"0"}}
 	}
 	to, pd := s.Provider.StartWith(extra)
-	s.Sessions.Put(w, oldID, session.Data{PendingState: pd.State, PendingNonce: pd.Nonce,
-		PendingVerifier: pd.Verifier, PendingCreated: pd.Created})
+	v, err := s.sealPending(pendingSignIn{State: pd.State, Nonce: pd.Nonce, Verifier: pd.Verifier,
+		Created: pd.Created, Expires: pd.Created.Add(pendingLife)})
+	if err != nil {
+		s.Log.Printf("sign-in: sealing the pending sign-in failed: %v", err)
+		http.Error(w, "Sign-in failed. Try again later.", http.StatusInternalServerError)
+		return
+	}
+	s.setPendingCookie(w, v, int(pendingLife.Seconds()))
 	http.Redirect(w, r, to, http.StatusFound)
 }
 
+// callback completes a sign-in. Every refusal leaves the current session, if any, as it was.
 func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
-	id, d := s.Sessions.Get(r)
-	if d == nil || d.PendingState == "" {
+	pd, ok := s.takePending(w, r)
+	if !ok {
 		http.Error(w, "No sign-in in progress. Start again.", http.StatusBadRequest)
 		return
 	}
 	if e := r.URL.Query().Get("error"); e != "" {
-		s.Sessions.Delete(w, id)
 		http.Error(w, "The identity provider refused the sign-in.", http.StatusForbidden)
 		return
 	}
-	pd := oidc.Pending{State: d.PendingState, Nonce: d.PendingNonce, Verifier: d.PendingVerifier, Created: d.PendingCreated}
-	ident, err := s.Provider.Finish(r.Context(), pd, r.URL.Query().Get("state"), r.URL.Query().Get("code"))
+	ident, err := s.Provider.Finish(r.Context(), pd.oidc(), r.URL.Query().Get("state"), r.URL.Query().Get("code"))
 	if err != nil {
-		s.Sessions.Delete(w, id)
 		s.Log.Printf("sign-in failed: %v", err)
 		http.Error(w, "Sign-in failed. Start again.", http.StatusForbidden)
 		return
 	}
+	if !s.signins.use(pd.State, pd.Expires, time.Now()) {
+		s.Log.Printf("sign-in failed: a pending sign-in was used twice")
+		http.Error(w, "Sign-in failed. Start again.", http.StatusForbidden)
+		return
+	}
 	if status, _ := ident.Claims["status"].(string); status != "" && status != "active" {
-		s.Sessions.Delete(w, id)
+		s.dropSessionOf(w, r, ident.Subject) // the provider has just said this account may not use us
 		http.Error(w, "This account is not active.", http.StatusForbidden)
 		return
 	}
 	login, _ := ident.Claims["login"].(string)
+	maintainer := s.isMaintainer(ident.Claims)
 	prev, errPrev := s.DB.GetUser(ident.Subject)
 	isNew := errPrev != nil
-	if s.DB.Flag("signin_off") && !s.isMaintainer(login) && (isNew || !prev.AdminGrant) {
+	if s.DB.Flag("signin_off") && !maintainer && (isNew || !prev.AdminGrant) {
 		// administrators stay exempt, or nobody could turn the switch back off
-		s.Sessions.Delete(w, id)
 		http.Error(w, "Sign-in is switched off for now. Try again later.", http.StatusServiceUnavailable)
 		return
 	}
-	if isNew && s.DB.Flag("signup_off") && !s.isMaintainer(login) {
-		s.Sessions.Delete(w, id)
+	if isNew && s.DB.Flag("signup_off") && !maintainer {
 		http.Error(w, "This platform is not taking new accounts for now. Try again later.", http.StatusServiceUnavailable)
 		return
 	}
 	u, err := s.DB.SeenUser(ident.Subject, login)
 	if err != nil {
-		s.Sessions.Delete(w, id)
 		s.Log.Printf("sign-in: recording the user failed: %v", err)
 		http.Error(w, "Sign-in failed. Try again later.", http.StatusInternalServerError)
 		return
 	}
 	if u.Banned {
-		s.Sessions.Delete(w, id)
+		s.dropSessionOf(w, r, ident.Subject)
 		http.Error(w, "This account is suspended on this platform.", http.StatusForbidden)
 		return
 	}
-	if s.isMaintainer(login) && !u.AdminGrant {
+	if maintainer && !u.AdminGrant {
 		if err := s.DB.SetGrant("bootstrap", u.Subject, "admin", true, "maintainer by 42 login"); err != nil {
 			s.Log.Printf("admin bootstrap failed: %v", err)
 		}
 	}
-	// a new session id at the change of privilege (no fixation)
-	s.Sessions.Put(w, id, session.Data{Subject: ident.Subject, Claims: ident.Claims,
+	// a new session id at the change of privilege (no fixation); the current session, if
+	// any, is dropped only now
+	oldID, _ := s.Sessions.Get(r)
+	s.Sessions.Put(w, oldID, session.Data{Subject: ident.Subject, Claims: ident.Claims,
 		RefreshToken: ident.RefreshToken, SignedInAt: time.Now()})
 	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// dropSessionOf ends the browser's current session if it belongs to subject. A failed
+// sign-in otherwise leaves the current session alone (decided: login must not sign out), but
+// when the provider or a ban says this very account may not be here, its session goes too.
+func (s *Server) dropSessionOf(w http.ResponseWriter, r *http.Request, subject string) {
+	if id, d := s.Sessions.Get(r); id != "" && d != nil && d.Subject == subject {
+		s.Sessions.Delete(w, id)
+	}
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
@@ -274,9 +297,17 @@ func (s *Server) Who(r *http.Request) (string, bool) {
 	return v.Subject, ok
 }
 
-func (s *Server) isMaintainer(login string) bool {
+// isMaintainer says whether the account signing in is a maintainer: its "login" claim is in
+// AdminLogins and its 42 account is linked (ft_linked true). Decided 2026-11-27: a
+// maintainer links their 42 account first, and "login" is then taken as the 42 login.
+// Without the link, the login claim alone could match a maintainer's name.
+func (s *Server) isMaintainer(claims map[string]any) bool {
+	login, _ := claims["login"].(string)
+	if login == "" || !truthy(claims["ft_linked"]) {
+		return false
+	}
 	for _, a := range s.AdminLogins {
-		if login != "" && strings.EqualFold(a, login) {
+		if strings.EqualFold(a, login) {
 			return true
 		}
 	}

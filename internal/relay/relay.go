@@ -44,9 +44,13 @@ const (
 	buffer          = 128 // DATA packets a client may send per stream before waiting for CONTINUE
 	// maxQueued is the most client bytes a stream may have waiting for the far end. Credit
 	// counts packets and a packet may be 1 MiB, so without it one stream could make the relay
-	// hold 128 MiB. 128 TCP segments are under 200 KB: an honest client never reaches it.
-	maxQueued         = 1 << 20
-	refusalLogsPerMin = 10 // refused CONNECTs logged per user a minute; the rest are only answered
+	// hold 128 MiB. The OS's client sends DATA packets of up to 64 KiB, so a full credit of
+	// those (128 x 64 KiB = 8 MiB) must fit: an honest client never reaches the cap.
+	maxQueued = buffer * 64 << 10
+	// refusalLogsPerMin is how many refused CONNECTs of each outcome are logged per user a
+	// minute; the rest are only answered. Per outcome, so a flood of one kind (a refused port)
+	// cannot hide a limit trip that the safety watcher and the administrators read.
+	refusalLogsPerMin = 10
 	tokenPrefix       = "ucos-token."
 	recheckInterval   = 5 * time.Second
 	usageFlushPeriod  = 10 * time.Second
@@ -80,7 +84,7 @@ type userState struct {
 	refs    int
 	// refusals logged in the current minute, so a client cannot fill the log with refusals
 	refusedAt time.Time
-	refused   int
+	refused   map[string]int // outcome -> refusals in the minute from refusedAt
 }
 
 // idle reports whether the state can be dropped: no socket, nothing to write, and no
@@ -158,7 +162,8 @@ func (rl *Relay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	s := &session{rl: rl, c: c, sub: claims.Sub, sid: claims.Sid, q: q, us: us, streams: map[uint32]*stream{}}
+	s := &session{rl: rl, c: c, sub: claims.Sub, sid: claims.Sid, us: us, streams: map[uint32]*stream{}}
+	s.q.Store(&q)
 	s.run()
 }
 
@@ -217,6 +222,9 @@ func (rl *Relay) usedToday(sub string, us *userState) int64 {
 func (rl *Relay) account(us *userState, n int64, limit int64) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+	if day := store.Day(time.Now()); us.day != day { // a transfer running across 00:00 UTC
+		us.used, us.day = 0, day
+	}
 	us.used += n
 	us.pending += n
 	return limit <= 0 || us.used <= limit
@@ -238,7 +246,7 @@ type session struct {
 	rl       *Relay
 	c        *ws.Conn
 	sub, sid string
-	q        store.Quota
+	q        atomic.Pointer[store.Quota] // the member tier's limits, re-read at every re-check
 	us       *userState
 
 	mu      sync.Mutex
@@ -351,6 +359,9 @@ func (s *session) watch(ctx context.Context) {
 				s.c.Close(1008, "access ended")
 				return
 			}
+			if q, err := s.rl.DB.GetQuota("member"); err == nil {
+				s.q.Store(&q) // an administrator's change reaches open sockets here
+			}
 		}
 	}
 }
@@ -368,11 +379,11 @@ func (s *session) refuse(id uint32, host string, reason byte, outcome string) {
 	_ = s.send(pClose, id, []byte{reason})
 	now := time.Now()
 	s.rl.mu.Lock()
-	if now.Sub(s.us.refusedAt) > time.Minute {
-		s.us.refusedAt, s.us.refused = now, 0
+	if s.us.refused == nil || now.Sub(s.us.refusedAt) > time.Minute {
+		s.us.refusedAt, s.us.refused = now, map[string]int{}
 	}
-	s.us.refused++
-	write := s.us.refused <= refusalLogsPerMin
+	s.us.refused[outcome]++
+	write := s.us.refused[outcome] <= refusalLogsPerMin
 	s.rl.mu.Unlock()
 	if write {
 		_ = s.rl.DB.LogConn(s.sub, "relay", host, 0, outcome)
@@ -411,6 +422,8 @@ func (s *session) connect(ctx context.Context, id uint32, body []byte) {
 	}
 	dest := fmt.Sprintf("%s:%d", host, port)
 	rl := s.rl
+	q := s.q.Load()
+	rl.usedToday(s.sub, s.us) // a socket open across 00:00 UTC starts the new day here
 	rl.mu.Lock()
 	now := time.Now()
 	for d, t := range s.us.dests {
@@ -420,15 +433,15 @@ func (s *session) connect(ctx context.Context, id uint32, body []byte) {
 	}
 	_, recent := s.us.dests[dest]
 	switch {
-	case s.q.Conns > 0 && s.us.streams >= s.q.Conns:
+	case q.Conns > 0 && s.us.streams >= q.Conns:
 		rl.mu.Unlock()
 		s.refuse(id, host, reasonThrottled, "too many connections")
 		return
-	case !recent && s.q.DestsPerMin > 0 && len(s.us.dests) >= s.q.DestsPerMin:
+	case !recent && q.DestsPerMin > 0 && len(s.us.dests) >= q.DestsPerMin:
 		rl.mu.Unlock()
 		s.refuse(id, host, reasonThrottled, "too many destinations")
 		return
-	case s.q.BytesPerDay > 0 && s.us.used >= s.q.BytesPerDay:
+	case q.BytesPerDay > 0 && s.us.used >= q.BytesPerDay:
 		rl.mu.Unlock()
 		s.refuse(id, host, reasonThrottled, "daily quota")
 		return
@@ -488,7 +501,7 @@ func (s *session) dial(ctx context.Context, st *stream, dest string) {
 		n, err := conn.Read(buf)
 		if n > 0 {
 			st.bytes.Add(int64(n))
-			ok := s.rl.account(s.us, int64(n), s.q.BytesPerDay)
+			ok := s.rl.account(s.us, int64(n), s.q.Load().BytesPerDay)
 			if s.send(pData, st.id, buf[:n]) != nil {
 				s.closeStream(st, reasonNetwork, "socket gone", false)
 				return
@@ -517,7 +530,7 @@ func (s *session) upstreamWriter(ctx context.Context, st *stream, conn net.Conn)
 			// counted before the write: the far end may answer at once, and a close that
 			// follows the answer must log these bytes too
 			st.bytes.Add(int64(len(p)))
-			ok := s.rl.account(s.us, int64(len(p)), s.q.BytesPerDay)
+			ok := s.rl.account(s.us, int64(len(p)), s.q.Load().BytesPerDay)
 			if _, err := conn.Write(p); err != nil {
 				s.closeStream(st, reasonNetwork, "write failed", true)
 				return

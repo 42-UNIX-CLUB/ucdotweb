@@ -432,3 +432,81 @@ func TestTrafficCountsOnlyTheSwitchedService(t *testing.T) {
 		t.Fatalf("all_off: a 50 GB proxy day did not trip: %+v", c)
 	}
 }
+
+// connKind writes a connection log line of one kind ("relay" or "proxy").
+func (r *rig) connKind(t *testing.T, at time.Time, subject, kind, outcome string) {
+	t.Helper()
+	if err := r.db.LogConn(subject, kind, "example.com", 0, outcome); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.db.Exec(`UPDATE conn_log SET at = ? WHERE subject = ? AND kind = ?`, at.Unix(), subject, kind); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The limit check counts only trips of the service the switch stops (owner, 2026-11-27).
+func TestLimitsCountOnlyTheSwitchedService(t *testing.T) {
+	at := func(r *rig) time.Time { return r.now.Add(-time.Minute) }
+
+	// relay_off: three relay users still suspend the relay
+	r := newRig(t, DefaultConfig())
+	for _, u := range []string{"a", "b", "c"} {
+		r.connKind(t, at(r), u, "relay", "too many destinations")
+	}
+	if s := r.w.Check(t.Context()); !s.Suspended || !r.db.Flag("relay_off") {
+		t.Fatalf("three relay users did not suspend the relay: %+v", s)
+	}
+
+	// relay_off: two relay users and one proxy user are two
+	r = newRig(t, DefaultConfig())
+	r.connKind(t, at(r), "a", "relay", "rate limited")
+	r.connKind(t, at(r), "b", "relay", "daily quota")
+	r.connKind(t, at(r), "c", "proxy", "rate limited")
+	s := r.w.Check(t.Context())
+	if c := check(t, s, "limits"); c.Tripped || s.Suspended || !strings.HasPrefix(c.Detail, "2 users hit a relay limit") {
+		t.Fatalf("a proxy trip counted for the relay: %+v", c)
+	}
+
+	// proxy_off: proxy trips count, relay trips do not
+	cfg := DefaultConfig()
+	cfg.Switch = "proxy_off"
+	r = newRig(t, cfg)
+	for _, u := range []string{"a", "b", "c"} {
+		r.connKind(t, at(r), u, "relay", "too many connections")
+	}
+	if s := r.w.Check(t.Context()); s.Suspended || r.db.Flag("proxy_off") {
+		t.Fatalf("relay trips suspended the proxy: %+v", s)
+	}
+	for _, u := range []string{"d", "e", "f"} {
+		r.connKind(t, at(r), u, "proxy", "200 cut at quota")
+	}
+	if s := r.w.Check(t.Context()); !s.Suspended || !r.db.Flag("proxy_off") || r.db.Flag("relay_off") {
+		t.Fatalf("three proxy users did not suspend the proxy: %+v", s)
+	}
+
+	// all_off: both services count together
+	cfg.Switch = "all_off"
+	r = newRig(t, cfg)
+	r.connKind(t, at(r), "a", "relay", "rate limited")
+	r.connKind(t, at(r), "b", "proxy", "rate limited")
+	r.connKind(t, at(r), "c", "proxy", "daily quota")
+	if s := r.w.Check(t.Context()); !s.Suspended || !r.db.Flag("all_off") {
+		t.Fatalf("all_off: three users across both services did not suspend: %+v", s)
+	}
+}
+
+// No switch stops bundles, so bundle traffic never trips the traffic check, even for all_off.
+func TestTrafficIgnoresBundles(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Switch = "all_off"
+	r := newRig(t, cfg)
+	for d := 1; d <= 7; d++ {
+		r.usage(t, d, 2_000_000_000)
+	}
+	if err := r.db.Exec(`INSERT INTO usage VALUES ('u', ?, 'bundle', 50000000000, 0)`, store.Day(r.now)); err != nil {
+		t.Fatal(err)
+	}
+	if c := check(t, r.w.Check(t.Context()), "traffic"); c.Tripped {
+		t.Fatalf("a bundle surge tripped the traffic check: %+v", c)
+	}
+}

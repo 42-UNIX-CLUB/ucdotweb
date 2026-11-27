@@ -27,8 +27,8 @@ lists the variables). Also: switches for sign-in and new sign-ups, a recent sign
 changes, 42-based membership that follows the 42 account's own state (the Clubroom's
 `ft_active` claim), and daily caps per service for the whole platform (docs/DESIGN.md 15.8
 and 15.9). The server side of moving UC.OS data between devices: encrypted bundles held
-until the expiry the user picks, for the same account only (`/api/bundles`, docs/DESIGN.md
-15.10). Not built yet: the admin program (a UC.OS program, decided), and the OS side of the
+until the expiry the user picks, for the same account only, under daily, per-upload and
+storage limits (`/api/bundles`, docs/DESIGN.md 15.10 and 15.13). Not built yet: the admin program (a UC.OS program, decided), and the OS side of the
 bundles (encryption, the QR code).
 
 Go standard library plus one module: github.com/mattn/go-sqlite3 (cgo, needs a C compiler). Tests: `go test ./...` (add `-race` for the race detector).
